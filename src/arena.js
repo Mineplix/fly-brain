@@ -20,13 +20,16 @@ const status = s => { $('#status').textContent = s; };
 const FLY_COLORS = ['#ffb347', '#5ac8fa', '#a3e635', '#f472b6', '#c084fc', '#facc15', '#fb7185', '#2dd4bf'];
 const presetKey = new URLSearchParams(location.search).get('env') || 'foraging';
 const PRESET = PRESETS[presetKey] || PRESETS.foraging;
-// Worker-pool cap. Each fly is one worker doing its own brain + physics, so the practical
-// ceiling is CPU-bound and well below MAX_FLIES on most machines. Default 4; ?flies=N
-// overrides. Hard-limited by MAX_FLIES because the shared brain memory is sized for
-// MAX_FLIES slots at load time (see allocBrainMemory) and cannot grow afterwards.
-// Note: slots are never reclaimed (no worker.terminate anywhere), so this is a lifetime
-// budget, not a concurrency limit -- lowering it requires a page reload.
-const FLY_CAP = Math.min(MAX_FLIES, Math.max(1, Number(new URLSearchParams(location.search).get('flies')) || 4));
+// Worker-pool cap. Each fly is one worker doing its own brain + physics. Default 6, from the
+// measured ramp on this machine (RTX 4050, WebGPU brain, rendering on): aggregate throughput
+// saturates at ~3 flies and never exceeds ~0.16 sim-s per wall-s, so past that more flies only
+// subdivide a fixed budget. 6 is the highest count that still holds a flat 165 fps, with
+// aggregate within 6% of the maximum. ?flies=N overrides.
+// Hard-limited by MAX_FLIES because the shared brain memory is sized for MAX_FLIES slots at
+// load time (see allocBrainMemory) and cannot grow afterwards. Note that slots are never
+// reclaimed (nothing calls worker.terminate), so this is a lifetime budget rather than a
+// concurrency limit -- lowering it needs a page reload.
+const FLY_CAP = Math.min(MAX_FLIES, Math.max(1, Number(new URLSearchParams(location.search).get('flies')) || 6));
 // ?vision=0 runs the flies blind: no eye raycasting (2 x 721 rays per fly per 20 ms) and no
 // flyvis optic-lobe model. The ~62k optic-lobe neurons stay in the connectome and keep their
 // chemical synapses -- they are simply never driven by light, so the fly navigates by smell,

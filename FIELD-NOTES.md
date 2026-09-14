@@ -676,8 +676,64 @@ fly-time whatever you pick — about 70 minutes. What changes is how it is divid
   aggregate is within 6% of the maximum. This is the recommended default.
 - More than 11 is counterproductive: at 12 both per-fly and aggregate drop.
 
-`?vision=0` on WebGPU is **unmeasured**. It was worth 3.6× on the WASM path; if it helps
-similarly here it would raise the aggregate ceiling, which is the number that matters.
+### 8.11 ✅ `?vision=0` on the RTX 4050 — it raises the ceiling, but not the way expected
+
+Same conditions, `?flies=12&bench=1&vision=0`, GPU confirmed `nvidia lovelace`.
+
+| flies | per fly (vision on) | per fly (blind) | **aggregate on** | **aggregate blind** | fps on | fps blind |
+|---:|---:|---:|---:|---:|---:|---:|
+| 1 | 0.0650 | 0.0652 | 0.0650 | 0.0652 | 165 | 165 |
+| 2 | 0.0570 | 0.0828 | 0.1139 | 0.1656 | 165 | 165 |
+| 3 | 0.0470 | 0.0666 | 0.1409 | 0.1998 | 165 | 155 |
+| 6 | 0.0247 | 0.0387 | 0.1485 | 0.2319 | 165 | 118 |
+| 9 | 0.0165 | 0.0298 | 0.1486 | 0.2684 | 107 | 92 |
+| 12 | 0.0102 | 0.0226 | 0.1219 | **0.2708** | 53 | 75 |
+
+**Aggregate ceiling rises from ~0.15 to ~0.27 — about +80%.** That is the number that
+matters for recording, because it raises the *total* fly-time produced per wall-second
+rather than redividing a fixed budget.
+
+❗ **But at one fly it makes no difference whatsoever: 0.0650 → 0.0652.**
+
+That is the opposite of the WASM path, where blinding a single fly gave **3.6×**. The
+explanation is that the two backends put vision and the brain on *different* processors:
+
+- The LIF brain runs on the **GPU**.
+- Vision is **CPU** work — `mj_multiRay` over 1442 rays, plus `fv_step` over 45,669 nodes
+  and 1.5 M edges in WASM.
+
+With one fly those two overlap and the GPU brain is the critical path, so removing vision
+frees a resource that was not the constraint. As flies are added the **CPU** saturates
+first, and vision's CPU cost becomes the thing capping aggregate throughput. So on WebGPU
+`?vision=0` is not a per-fly optimisation at all — it is purely a *scaling* one.
+
+📌 Corollary: the ~0.15 aggregate ceiling with vision on is set by **CPU-side vision work,
+not by the GPU**. Only once vision is removed does the ~0.27 ceiling appear, which is
+presumably where GPU contention and the per-step `await queue.onSubmittedWorkDone()` finally
+bite.
+
+⚠️ Two honest caveats about that table:
+- **fps is *lower* blind at mid counts** (118 vs 165 at 6 flies). Not a regression — the
+  flies are simulating ~1.6× faster, so they post poses more often and the render thread has
+  more to do. Throughput was traded for frame rate.
+- **The 2-fly blind row (0.0828 per fly) is higher than the 1-fly row**, which should not
+  happen. Single sample, not reproduced; treat that one row as noise rather than a real
+  super-linear effect.
+
+### 8.12 Operating points
+
+| goal | setting | result |
+|---|---|---|
+| smooth live playback | 6 flies, vision on | 165 fps, 0.1485 aggregate |
+| maximum recorded fly-time | 12 flies, `?vision=0` | 0.2708 aggregate, 75 fps |
+
+An 8-hour unattended run:
+
+- **6 flies, vision on** → ~71 min total fly-time (~12 min each)
+- **12 flies, blind** → ~130 min total fly-time (~11 min each)
+
+So blind recording gives **~1.8× more total behaviour per night** *and* twice as many
+flies, at the cost of the animals navigating by odour, taste and touch alone.
 
 ---
 
