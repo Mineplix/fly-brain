@@ -87,3 +87,11 @@ a { color: var(--acc); }
   color: var(--fg); border-radius: 6px; padding: 5px 8px; font: inherit; }
 #jcmd:focus { outline: none; border-color: #f6c624; }
 #jhint { font-size: 10px; line-height: 1.5; }
+
+/* PROJECT: NAF — the expansion sits under the short name so a 360px panel header
+   does not wrap the full phrase across three lines at 15px */
+#panel .hrow h1 small {
+  display: block; margin-top: 2px;
+  font-size: 10px; font-weight: 500; letter-spacing: .06em;
+  text-transform: uppercase; color: var(--dim);
+}
