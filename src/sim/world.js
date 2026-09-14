@@ -11,6 +11,7 @@ export const DEFAULT_ENV = {
   obstacles: [{ type: 'box', x: -0.4, y: 1.2, sx: 0.25, sy: 0.25, sz: 0.3 }],
   hazards: [{ x: -1.4, y: 0.6, r: 0.35, heat: 1.0 }],   // hot floor: damages the fly
   light: { sky: 1.0, sun: [0.3, 0.2, 1.0] },
+  humidity: 0.45,                 // ambient relative humidity; moist food raises it locally, heat dries it
   wind: [0, 0],
   threat: null,   // { x, y, z } position of the looming object (set by the host), or null
 };

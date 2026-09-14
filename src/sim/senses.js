@@ -146,6 +146,16 @@ export class Senses {
     // temperature: hot floor patches heat the fly (thermosensory neurons of the arista)
     st.heat = heatAt(st.pos, env);
     for (const sd of ['left', 'right']) { const h = heatAt(st.antenna[sd], env); if (h > 0.05) this.set(this.S[`thermosensory ${sd}`] || [], 200 * h); }
+    // humidity: the 65 hygrosensory neurons sit in the antenna next to the thermosensory ones and
+    // were never driven. The bodymap pools moist and dry cells into one group per side, so only
+    // the moist response is modelled, and it is driven by the rise *above ambient* rather than by
+    // the absolute level -- a gradient is what a fly can actually navigate, and a constant ambient
+    // would otherwise hold the whole population at a fixed rate forever.
+    st.humidity = humidityAt(st.pos, env);
+    for (const sd of ['left', 'right']) {
+      const q = humidityAt(st.antenna[sd], env) - (env.humidity ?? HUMID.base);
+      if (q > 0.01) this.set(this.S[`hygrosensory ${sd}`] || [], Math.min(160, 320 * q));
+    }
     return this.rates;
   }
 }
@@ -222,6 +232,26 @@ export function clearance(p, env, others = [], z = null) {
   return d;
 }
 /** floor heat 0..1 at point p: full over a hot patch, fading over 4 mm around it */
+// Humidity. The arena already has water in it -- every food patch carries a `water` fraction --
+// so moist food is the obvious vapour source, with heat drying the air locally and wind mixing
+// the excess back toward ambient. Hygrosensory neurons sit in the antenna alongside the
+// thermosensory ones, which is why both are sampled per antenna rather than at the body.
+export const HUMID = { base: 0.45, plumeCm: 0.55, fromWater: 0.5, dryPerHeat: 0.35, windMix: 0.25 };
+
+export function humidityAt(p, env) {
+  const base = env.humidity ?? HUMID.base;
+  let h = base;
+  for (const f of env.food || []) {
+    if (!(f.water > 0) || !(f.amount > 0)) continue;
+    const d = Math.max(0, Math.hypot(p[0] - f.x, p[1] - f.y) - f.r);   // from the patch edge, not its centre
+    h += HUMID.fromWater * f.water * Math.exp(-(d * d) / (2 * HUMID.plumeCm * HUMID.plumeCm));
+  }
+  h -= HUMID.dryPerHeat * heatAt(p, env);                              // hot floor evaporates it away
+  const w = Math.hypot(env.wind?.[0] || 0, env.wind?.[1] || 0);
+  if (w > 0) h = base + (h - base) / (1 + HUMID.windMix * w);          // wind mixes the excess out
+  return h < 0 ? 0 : h > 1 ? 1 : h;
+}
+
 export function heatAt(p, env) {
   let heat = 0; for (const h of env.hazards) { const d = Math.hypot(p[0] - h.x, p[1] - h.y); heat = Math.max(heat, h.heat * Math.max(0, 1 - Math.max(0, d - h.r) / 0.4)); }
   return heat;
