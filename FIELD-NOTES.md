@@ -852,13 +852,45 @@ read `17.4, 3.4, 10.2, 8.9, 10.5, 10.4 Hz`, i.e. six distinct values, so every f
 is reaching its own panel rather than one fly's being mirrored six times.
 ✅ Canvas sized correctly: 319 × 504 px for 6 rows at `STACK_ROW = 84`.
 
-⚠️ **Open aesthetic question.** At ~82k points in an 84 px row the brains read as fairly
-solid green silhouettes — the *shape* is clear but internal structure is not. The cause is
-that the resting colour `(0.03, 0.09, 0.06)` is itself green, and with normal (not
-additive) blending a dense overlap of resting points fills the silhouette. Darkening rest
-toward black would make individual spikes pop. Not changed, because the reference video's
-panels also read as fairly solid green shapes — so this may already be right. Judge it live
-before tuning.
+### 11.5 ✅ Contrast: resting neurons darkened
+
+The first version read as solid green silhouettes — shape clear, internal structure not.
+Cause: the resting colour was itself green, and with normal (non-additive) blending ~82k
+overlapping resting points fill the whole outline, leaving spikes nowhere to stand out.
+
+Fixed by making rest near-black and passing the ramp through a smoothstep:
+
+```js
+const t = Math.min(1, trace[idx[k]] * 1.6);
+const v = t * t * (3 - 2 * t);      // crush the decaying tail, keep fresh spikes bright
+```
+
+| | before | after |
+|---|---:|---:|
+| resting luminance | 0.075 | **0.022** (3.4× darker) |
+| peak luminance | 0.804 | 0.823 |
+| **rest : peak ratio** | 10.7× | **37.4×** |
+
+📌 **The measurement that mattered.** Sampling a live fly's trace (82,561 neurons at
+sim-t 2.3 s) shows a strongly **bimodal** distribution:
+
+| trace bin | share |
+|---|---|
+| 0.0–0.2 | **90.1%** |
+| 0.2–0.8 | 2.4% |
+| 0.8–1.0 | **7.5%** |
+
+So ~9.2% of points render bright. Because almost nothing sits in the middle, the smoothstep
+barely changes the lit fraction on its own (9.41% → 9.16%) — **darkening the floor is what
+actually did the work.** The smoothstep is kept because it still suppresses the sparse
+mid-range tail between spikes, but it is not the reason this worked. Useful general lesson:
+with a bimodal signal, adjust the floor, not the curve.
+
+✅ Verified on screen at 6 flies: rows show bright green speckle with visible internal
+structure against near-black, each with its own rate (8.2 / 3.7 / 5.5 / 14.6 / 13.4 Hz).
+
+📌 On a fresh load the lower rows sit dark for a second or two before filling in — that is
+the round-robin poll working through the flies, not a bug.
 
 ---
 
