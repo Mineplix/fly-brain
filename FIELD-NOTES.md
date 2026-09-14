@@ -75,9 +75,43 @@ fallback for static hosts that can't set headers (e.g. GitHub Pages).
 
 ---
 
-## 2. ⚠️ The big performance finding: the GPU backend is the slow path
+## 2. The two brain backends — and which is actually faster
 
-This is the single most important thing in these notes.
+> ### ❗ CORRECTION — read this before the rest of the section
+>
+> An earlier version of these notes called WebGPU "the slow path" and treated **0.043× on
+> WASM** as this machine's real capability. **That was measured on the wrong GPU.**
+>
+> Every browser-automation measurement in this file was taken in a preview pane that
+> **cannot see the RTX 4050 at all** — `requestAdapter({powerPreference:'high-performance'})`
+> returns Intel `gen-12lp` there, always. In the user's **real Chrome**, `chrome://gpu`
+> reports `NVIDIA GeForce RTX 4050` and **both** the default and high-performance WebGPU
+> adapters return `nvidia`.
+>
+> Measured in real Chrome, one fly:
+>
+> | backend | sim-sec per wall-sec | |
+> |---|---:|---|
+> | WASM (`?gpu=0`) | 0.0148 | baseline |
+> | **WebGPU on the RTX 4050** | **0.19** | **~13× faster** |
+>
+> So the defaults in `attachBrain()` are **right**, not broken. Two conclusions that
+> followed from the bad numbers are withdrawn:
+>
+> - ❌ *"WebGPU is ~32× slower than WASM."* True only when WebGPU lands on a weak iGPU.
+> - ❌ *"`lifgpu.js:158` needs `powerPreference: 'high-performance'`."* **No bug.** The
+>   plain `requestAdapter()` already returns the discrete GPU on this machine. Tested
+>   before writing the patch, which is the only reason a pointless PR wasn't opened.
+>
+> ⚠️ **Section 8 (the Phase 3 fly-count ceiling) is therefore WASM-only** and understates
+> what this machine can do. It needs re-running on WebGPU in real Chrome.
+>
+> 📌 Method lesson: check *which physical device* a benchmark is running on before drawing
+> conclusions from it. The adapter string is one line of JavaScript and would have caught
+> this at the start.
+
+The rest of this section still holds **for the iGPU case**, which is what a machine without
+a usable discrete GPU will hit.
 
 ✅ **`attachBrain()` defaults to WebGPU and only falls back to WASM on an exception:**
 
@@ -546,9 +580,30 @@ genuinely different. Worth re-testing before trusting any absolute number too ha
 
 ### 8.8 What this means for the overnight goal
 
-At the ~6-fly knee, each fly runs at ~0.010× real time (100 s wall per simulated second).
-An 8-hour unattended run yields roughly **4–5 minutes of fly time per fly**, six flies in
-parallel. Vision is on in all of this; Phase 4 should improve it materially.
+⚠️ **Superseded — see the correction in section 2.** These figures are WASM-on-iGPU.
+
+WASM path, at the ~6-fly knee: ~0.010× real time, i.e. an 8-hour run gives **4–5 minutes of
+fly time per fly**.
+
+Real Chrome on the RTX 4050, WebGPU, one fly, is **0.19×** — 5.3 s of wall clock per
+simulated second:
+
+| backend (1 fly) | wall per sim-second | fly-time from an 8-hour run |
+|---|---:|---:|
+| WASM | 68 s | **7 min** |
+| **WebGPU / RTX 4050** | **5.3 s** | **91 min** |
+
+**13× more simulated time per night.** That turns the headless-recording goal from
+marginal into comfortable — and this is *before* `?vision=0`, which was worth another 3.6×
+on the WASM path (unmeasured on WebGPU).
+
+The multi-fly ceiling on WebGPU is **unknown**. The WASM knee at ~6 flies came from CPU
+contention, most likely memory bandwidth; a GPU backend has entirely different scaling, and
+per-fly cost may stay flat much further since the connectome is read once per dispatch.
+Re-running the Phase 3 ramp on WebGPU is the single most valuable outstanding measurement.
+
+📌 It cannot be done from the automation pane — that pane cannot see the discrete GPU.
+It needs real Chrome, either driven by the user or via a connected browser extension.
 
 ---
 
