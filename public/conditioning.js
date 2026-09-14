@@ -30,14 +30,19 @@ const fail = e => { colour = '#f87171'; head = 'ERROR'; say(''); say(String((e &
 paint();
 window.addEventListener('unhandledrejection', ev => fail(ev.reason));
 
+// Every fly is an independent replicate: its brain seed is 101+id and its intrinsic seed id+1,
+// so they differ in noise while sharing one environment. Running them together is also far
+// cheaper than sequential runs -- per-fly rate falls but aggregate throughput rises, so four
+// replicates cost about a quarter of what four separate runs would.
 const fly = () => A.flies[0];
 const simT = () => fly().last?.t ?? 0;
+const alive = () => A.flies.filter(f => f.last && f.last.alive !== false);
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 const sync = () => { for (const f of A.flies) if (f.ready) f.worker.postMessage({ type: 'env', env: A.env }); };
 // ?learn=0 must survive the protocol. The training phase explicitly enables plasticity, which
 // would otherwise re-enable it in the control and make the control identical to the test.
 const LEARN_OK = new URLSearchParams(location.search).get('learn') !== '0';
-const setLearn = on => fly().worker.postMessage({ type: 'learn', on: on && LEARN_OK });
+const setLearn = on => { for (const f of A.flies) f.worker.postMessage({ type: 'learn', on: on && LEARN_OK }); };
 
 /** Uniform odour across the whole arena, so the reading does not depend on where the fly wanders. */
 function present(odor, heat) {
@@ -50,85 +55,95 @@ function present(odor, heat) {
 /** Advance a given amount of SIMULATED time, averaging MBON drive over the second half. */
 async function phase(label, ms, { measure = false } = {}) {
   const start = simT(); let n = 0;
-  const acc = { all: 0, exc: 0, inh: 0, aver: 0, appet: 0 };
+  const acc = new Map();   // fly id -> running sums
   head = label; paint();
   while (simT() - start < ms) {
     await sleep(250);
     if (measure && simT() - start > ms * 0.4) {
-      const m = fly().last?.mb;
-      if (m) { acc.all += m.mbon; acc.exc += m.mExc; acc.inh += m.mInh; acc.aver += m.mAver; acc.appet += m.mAppet; n++; }
+      for (const f of A.flies) {
+        const m = f.last?.mb; if (!m) continue;
+        let a = acc.get(f.id); if (!a) { a = { all: 0, exc: 0, inh: 0, aver: 0, appet: 0, n: 0 }; acc.set(f.id, a); }
+        a.all += m.mbon; a.exc += m.mExc; a.inh += m.mInh; a.aver += m.mAver; a.appet += m.mAppet; a.n++;
+      }
+      n++;
     }
     head = `${label}  (${((simT() - start) / 1000).toFixed(1)}/${(ms / 1000).toFixed(1)} sim s)`; paint();
   }
   if (!n) return null;
-  const r = {}; for (const k in acc) r[k] = acc[k] / n;
-  // The quantities that can actually express an association: the balance between MBON groups
-  // with opposing valence, and between the punishment- and reward-taught compartments.
-  r.excInh = r.inh > 0 ? r.exc / r.inh : 0;
-  r.averAppet = r.appet > 0 ? r.aver / r.appet : 0;
-  return r;
+  const out = new Map();
+  for (const [id, a] of acc) {
+    if (!a.n) continue;
+    const r = { all: a.all / a.n, exc: a.exc / a.n, inh: a.inh / a.n, aver: a.aver / a.n, appet: a.appet / a.n };
+    r.excInh = r.inh > 0 ? r.exc / r.inh : 0;
+    r.averAppet = r.appet > 0 ? r.aver / r.appet : 0;
+    out.set(id, r);
+  }
+  return out;
 }
+
+const KEYS = ['all', 'exc', 'inh', 'aver', 'appet', 'excInh', 'averAppet'];
+const LABEL = { all: 'all', exc: 'excitatory', inh: 'inhibitory', aver: 'aversive cmpt',
+                appet: 'appetitive cmpt', excInh: 'exc/inh ratio', averAppet: 'aver/appet ratio' };
+const mean = v => v.reduce((s, x) => s + x, 0) / v.length;
+const sd = v => { if (v.length < 2) return 0; const m = mean(v); return Math.sqrt(v.reduce((s, x) => s + (x - m) ** 2, 0) / (v.length - 1)); };
+const sg = x => (x >= 0 ? '+' : '') + x.toFixed(1);
 
 try {
   if (!A) throw new Error('arena not ready');
   const play = document.querySelector('#play');
   if (play && !play.textContent.includes('Pause')) play.click();
 
-  say(LEARN_OK ? 'RUN: plasticity ON' : 'CONTROL: plasticity OFF throughout (?learn=0)');
+  while (A.flies.length < A.FLY_CAP) await A.addFly([Math.random() * 2 - 1, Math.random() * 2 - 1], Math.random() * 6.28);
+  const N = A.flies.length;
+
+  say(LEARN_OK ? 'RUN: plasticity ON' : 'CONTROL: plasticity OFF (?learn=0)');
+  say(`${N} flies = ${N} independent replicates (seeds differ by fly id)`);
   say('CS+ vinegar (punished)   CS- geosmin (safe)');
-  say('learning frozen during all four probes');
   say('');
 
   present(null, 0);
-  await phase('settling — dopamine baseline', 5000);
+  await phase('settling — dopamine baseline', 4000);
 
   setLearn(false);
-  present('vinegar', 0); const preA = await phase('PRE-test  CS+ vinegar', 3000, { measure: true });
-  present('geosmin', 0); const preB = await phase('PRE-test  CS- geosmin', 3000, { measure: true });
-  const f2 = x => x.toFixed(2), f3 = x => x.toFixed(3);
-  say(`pre  CS+  all ${f2(preA.all)}  exc/inh ${f3(preA.excInh)}  aver/appet ${f3(preA.averAppet)}`);
-  say(`pre  CS-  all ${f2(preB.all)}  exc/inh ${f3(preB.excInh)}  aver/appet ${f3(preB.averAppet)}`);
+  present('vinegar', 0); const preA = await phase('PRE  CS+ vinegar', 2500, { measure: true });
+  present('geosmin', 0); const preB = await phase('PRE  CS- geosmin', 2500, { measure: true });
 
   setLearn(true);
   present('vinegar', 0.5);
-  await phase('TRAINING — CS+ paired with heat', 7000);
-  const dep = fly().last?.mb?.depressed;
+  await phase('TRAINING — CS+ paired with heat', 6000);
+  const dep = A.flies.map(f => f.last?.mb?.depressed ?? 0);
   setLearn(false);
   present(null, 0);
-  await phase('rest', 2000);
-  say(`trained: ${dep} synapses depressed`);
+  await phase('rest', 1500);
+  say(`depressed per fly: ${dep.join(', ')}`);
   say('');
 
-  present('vinegar', 0); const postA = await phase('POST-test CS+ vinegar', 3000, { measure: true });
-  present('geosmin', 0); const postB = await phase('POST-test CS- geosmin', 3000, { measure: true });
+  present('vinegar', 0); const postA = await phase('POST CS+ vinegar', 2500, { measure: true });
+  present('geosmin', 0); const postB = await phase('POST CS- geosmin', 2500, { measure: true });
 
-  say(`post CS+  all ${f2(postA.all)}  exc/inh ${f3(postA.excInh)}  aver/appet ${f3(postA.averAppet)}`);
-  say(`post CS-  all ${f2(postB.all)}  exc/inh ${f3(postB.excInh)}  aver/appet ${f3(postB.averAppet)}`);
+  // Per fly: how much CS+ moved minus how much CS- moved. One number per replicate per readout.
+  const pc = (a, b) => (a > 0 ? 100 * (b - a) / a : 0);
+  const per = {}; for (const k of KEYS) per[k] = [];
+  const ids = [...preA.keys()].filter(id => postA.has(id) && preB.has(id) && postB.has(id));
+  for (const id of ids) for (const k of KEYS) {
+    per[k].push(pc(preA.get(id)[k], postA.get(id)[k]) - pc(preB.get(id)[k], postB.get(id)[k]));
+  }
+
+  say(`readout            CS+ minus CS-, per fly        mean +/- sd`);
+  const summary = {};
+  for (const k of KEYS) {
+    const v = per[k], m = mean(v), s = sd(v);
+    summary[k] = { values: v.map(x => +x.toFixed(1)), mean: +m.toFixed(1), sd: +s.toFixed(1) };
+    say(`${LABEL[k].padEnd(18)} ${v.map(x => sg(x).padStart(7)).join('')}   ${sg(m).padStart(7)} +/-${s.toFixed(1).padStart(5)}`);
+  }
   say('');
-  const pc = (a, b) => 100 * (b - a) / a;
-  const rows = [['all', pc(preA.all, postA.all), pc(preB.all, postB.all)],
-                ['excitatory', pc(preA.exc, postA.exc), pc(preB.exc, postB.exc)],
-                ['inhibitory', pc(preA.inh, postA.inh), pc(preB.inh, postB.inh)],
-                ['aversive cmpt', pc(preA.aver, postA.aver), pc(preB.aver, postB.aver)],
-                ['appetitive cmpt', pc(preA.appet, postA.appet), pc(preB.appet, postB.appet)],
-                ['exc/inh ratio', pc(preA.excInh, postA.excInh), pc(preB.excInh, postB.excInh)],
-                ['aver/appet ratio', pc(preA.averAppet, postA.averAppet), pc(preB.averAppet, postB.averAppet)]];
-  const sg = x => (x >= 0 ? '+' : '') + x.toFixed(1) + '%';
-  say('readout            CS+(punished)   CS-(safe)   difference');
-  for (const [nm, a, b] of rows) say(`${nm.padEnd(18)} ${sg(a).padStart(8)}  ${sg(b).padStart(10)}  ${sg(a - b).padStart(10)}`);
-  say('');
-  const dA = pc(preA.averAppet, postA.averAppet), dB = pc(preB.averAppet, postB.averAppet);
-  const diff = dA - dB;
-  const specific = Math.abs(diff) > 5;           // CS+ and CS- moved differently at all
-  const aversive = diff < -5;                    // and in the direction aversive learning predicts
-  colour = aversive ? '#4ade80' : (specific ? '#60a5fa' : '#fbbf24');
-  const tag = LEARN_OK ? '' : ' [CONTROL, no plasticity]';
-  head = (aversive ? 'ODOUR-SPECIFIC, aversive direction'
-       : specific ? 'ODOUR-SPECIFIC, but opposite sign'
-                  : 'NO SELECTIVITY') + tag;
-  say(aversive ? 'CS+ shifted away from the aversive compartments, CS- did not.'
-    : specific ? 'CS+ and CS- moved differently, so the change is odour specific -- but the punished odour drove the aversive compartments MORE, not less.'
-               : 'CS+ and CS- moved together: general depression, not an association.');
-  window.__cond = { preA, preB, postA, postB, rows, dep, specific, aversive, diff };
+  const a = summary.aversive || summary.aver, p = summary.appet;
+  const clear = Math.abs(a.mean) > 2 * a.sd && a.sd > 0;
+  colour = clear ? '#60a5fa' : '#fbbf24';
+  head = (clear ? 'EFFECT EXCEEDS SPREAD' : 'EFFECT WITHIN SPREAD') + (LEARN_OK ? '' : ' [CONTROL]');
+  say(clear
+    ? `aversive compartments: ${sg(a.mean)} +/- ${a.sd.toFixed(1)}, larger than the run-to-run spread.`
+    : `aversive compartments: ${sg(a.mean)} +/- ${a.sd.toFixed(1)} -- not separable from noise at n=${ids.length}.`);
+  window.__cond = { n: ids.length, learn: LEARN_OK, dep, summary };
   paint();
 } catch (e) { fail(e); }
