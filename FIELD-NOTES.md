@@ -698,14 +698,71 @@ Amusing corollary: the black/white checker is close to the high-contrast grating
 real *Drosophila* optomotor experiments, so the circus arena is arguably a *better* visual
 stimulus than the muted one it replaces.
 
-### 10.4 ⚠️ Not visually verified
+### 10.4 Tent canopy
+
+`addTentCeiling()` — an open `ConeGeometry` sitting on the wall top, `BackSide`, striped
+with the **same 24-wedge texture as the wall** so the panels line up with the stripes below.
+
+Two deliberate decisions:
+
+- **Purely visual, no collision geom.** `FLIGHT.alt` cruises flies at **0.35–0.75 cm**
+  against a **1.2 cm** wall, so nothing can ever reach a canopy above that. Adding physics
+  would have been dead weight and would have changed flight behaviour for no benefit.
+- **`castShadow = false`.** The sun is at `(3, 2, 8)`, i.e. overhead. A shadow-casting
+  canopy would have blacked out the entire arena it is supposed to be lighting.
+
+`BackSide` also means it is invisible from outside, so the camera can still look down into
+the arena from above — the cone doesn't block the useful viewing angle.
+
+### 10.5 Spiral staircase — and the obstacle-schema change it forced
+
+16 treads at 30° and 0.062 cm per step (**1.25 turns, 1.01 cm tall**) around a newel post;
+17 geoms. Validated numerically: max radius **2.395 cm** inside a 2.5 cm arena, height
+**1.01 cm** below the 1.2 cm wall.
+
+**It is a real obstacle, not scenery.** The treads are pushed into `env.obstacles`, and
+because `env` is what gets sent to every worker, that single definition gives you collision
+geoms (`world.js`), obstacle sensing (`clearance()`), and eye-ray hits — for free.
+
+That required the obstacle schema to grow two optional fields. It previously assumed every
+obstacle was a **floor-standing, axis-aligned box**:
+
+| field | meaning | touched |
+|---|---|---|
+| `o.z` | height of the underside (default 0) | `world.js`, `senses.js`, `arena.js` |
+| `o.yaw` | rotation about vertical, boxes only | `world.js`, `senses.js`, `arena.js` |
+
+Two fixes in `clearance()` that matter:
+
+1. It now **rotates the query point into the box's own frame** rather than doing an
+   axis-aligned `Math.abs(x - o.x) - o.sx` test, which would have been wrong for every
+   tread.
+2. A raised tread blocks **only over its own height band** (`z > zb + o.sz` or `z < zb`
+   skips it). Without this a spiral staircase would read as a solid column and a fly would
+   sense a wall where it can actually walk underneath.
+
+📌 **`flight.js overObstacle()` deliberately left alone.** It ignores both `yaw` and `z`,
+but it only answers "is something under me, don't land here". Ignoring `z` is right (the
+staircase *is* a solid column from above) and the AABB of a rotated box is conservative,
+which errs safe.
+
+⚠️ **This is a behavioural change.** Under `?theme=circus` every preset gains 17 obstacles
+near `(-1.3, -1.3)`, including `openfield`, `social` and `courtship`, which were previously
+obstacle-free. Use `?theme=lab` for a clean arena when running behavioural comparisons.
+The staircase also slightly overlaps the default bitter patch at `(-1.0, -0.7)` — cosmetic
+only, since patches are non-colliding flat discs.
+
+### 10.6 ⚠️ Not visually verified
 
 Syntax-checked, and the theme resolution and fallback were unit-tested in Node. **No
 screenshot was taken.** The automation browser wedged under memory pressure (free RAM
 reached 763 MB, with Roblox at 1.4 GB alongside a stuck tab) and two navigations timed out
 at 300 s. Nothing in the rendering path is confirmed working end to end.
 
-First thing to do next session: open `arena.html` in a real browser and look at it.
+Three navigation attempts timed out at 300 s each; free RAM was 0.8-1.2 GB throughout, with
+Roblox holding ~2 GB. **Nothing in the circus arena -- floor, stripes, bunting, canopy or
+staircase -- has been seen rendering.** First thing next session: open `arena.html` in a
+real browser and look at it.
 
 ---
 
