@@ -766,7 +766,69 @@ real browser and look at it.
 
 ---
 
-## 11. Open questions for later phases
+## 11. The six-panel neural stack
+
+One small brain per fly, stacked in the side panel, all live at once — instead of only the
+selected fly's.
+
+### 11.1 The constraint that shaped it: message traffic, not pixels
+
+Each `activity` reply carries **`fly.brain.trace.slice(0)` — the full 165,122-neuron trace,
+about 660 kB**. The original poll asks one fly every 120 ms (~5.3 MB/s).
+
+Naively polling *every* fly at that rate multiplies it by the fly count: **~32 MB/s at six
+flies**, on a machine that had already been driven into swap twice.
+
+**Fix: round-robin the poll.** Total traffic stays exactly one message per 120 ms tick.
+The selected fly takes every other slot (so the big inset stays responsive) and the others
+share the remainder — at six flies each stack row refreshes ~1.6 Hz. For an activity
+monitor that reads fine, and it costs nothing extra.
+
+```js
+const f = (sel && (pollTurn & 1)) ? sel : ready[(pollTurn >> 1) % ready.length];
+```
+
+### 11.2 Rendering — one canvas, N viewports
+
+- **One `WebGLRenderer`** over a single canvas, `autoClear = false`, `setScissorTest(true)`,
+  drawn as N scissored viewports. Clear once, then render each row.
+- **Positions are shared** by every row — one buffer for all flies.
+- **Each fly owns a colour `BufferAttribute`**, swapped in with `setAttribute('color', …)`
+  before its row draws. Three keeps a GPU buffer per attribute object, so a fly's colours
+  upload only when its trace arrives, not every frame.
+- **Somas subsampled at stride 2.** A row is 84 px tall; 165k points into that is wasted
+  bandwidth. ~82k points per row, ~1 MB colour buffer per fly.
+- Viewport origin is bottom-left in three, so row *i* sits at `y = h - (i+1)*ROW` to make
+  the rows read top-down.
+
+📌 `setViewport`/`setScissor` take **CSS pixels** — three applies the pixel ratio itself.
+Multiplying by `devicePixelRatio` manually gives wrong rows on a HiDPI screen.
+
+📌 `stackLabels()` is called from `renderFlyList()`, which also ticks every 500 ms. It
+early-returns unless the fly count or selection changed, otherwise it would wipe the live
+Hz readouts twice a second.
+
+### 11.3 Placement — a deliberate compromise
+
+The reference video shows a separate floating "Neural activity" window. This is instead
+**inside the existing brain panel**, at the top of `#bpBody`.
+
+Reason: that panel is already a right-hand column with working scroll and fold behaviour,
+and a second absolutely-positioned panel is exactly the kind of change that needs to be
+*looked at* — which was not possible. Moving it out later is a CSS change, not a rewrite.
+
+### 11.4 Verification status
+
+✅ `npm run build` succeeds (1.4 s, all entry points, no errors) — so rollup resolves
+everything and there are no module-level reference errors.
+✅ Source data in `public/data/` confirmed intact afterwards (the `dropUnpacked` plugin
+only touches `dist/`).
+⚠️ **Never seen rendering.** Free RAM was 0.8–1.2 GB with Roblox holding 1.3–2 GB
+throughout; the automation browser stayed wedged across four attempts.
+
+---
+
+## 12. Open questions for later phases
 
 - Does `powerPreference: 'high-performance'` in `lifgpu.js:158` change the picture on the
   4050? If WebGPU on discrete silicon beats 0.043×, the whole Phase 3 calculus changes.
