@@ -14,8 +14,11 @@ import { createBrain } from '../brainmodel.js';
 const Rt9 = (xm, b) => [xm[b * 9], xm[b * 9 + 3], xm[b * 9 + 6]];   // body x axis (heading) in world frame
 
 export class FlyAgent {
-  constructor({ mj, flyXML, env, data, size, sign, bodymap, gait, id = 0, pos = [0, 0], yaw = 0, nProxies = 0, mode = 'descending', brainOpts = {}, vision = true, brain = null, flyvis = null, intrinsic = true, seed = 0, neuromod = null, sex = 'm' }) {
+  constructor({ mj, flyXML, env, data, size, sign, bodymap, gait, id = 0, pos = [0, 0], yaw = 0, nProxies = 0, mode = 'descending', brainOpts = {}, vision = true, brain = null, flyvis = null, intrinsic = true, seed = 0, neuromod = null, sex = 'm', look = null }) {
     this.id = id; this.mj = mj; this.env = env; this.data = data; this.vision = vision; this.sex = sex;
+    // Reflectance of the checker floor and striped wall, matching whatever the host is drawing.
+    // Defaults are the original muted arena; the circus theme is far higher contrast.
+    this.look = look || { floorLo: 0.35, floorHi: 0.60, wallLo: 0.15, wallHi: 0.75 };
     this.model = mj.MjModel.from_xml_string(buildWorldXML(flyXML, env, { flyPos: [pos[0], pos[1], 0.132], flyYaw: yaw, nProxies }));
     this.mjd = new mj.MjData(this.model);
     this.physPerMs = Math.round(0.001 / this.model.opt.timestep);
@@ -96,10 +99,10 @@ export class FlyAgent {
     return st;
   }
   albedo = (g, x, y) => {
-    const k = this.geomKind[g];
+    const k = this.geomKind[g], L = this.look;
     if (k === 'threat') return 0.03;
-    if (k === 'floor') return 0.35 + 0.25 * (((Math.floor(x / 0.4) + Math.floor(y / 0.4)) & 1) ? 1 : 0);   // checker floor
-    if (k === 'wall') { const a = Math.atan2(y, x); return 0.15 + 0.6 * ((Math.floor(a / (Math.PI / 12)) & 1) ? 1 : 0); }  // striped wall
+    if (k === 'floor') return L.floorLo + (L.floorHi - L.floorLo) * (((Math.floor(x / 0.4) + Math.floor(y / 0.4)) & 1) ? 1 : 0);   // checker floor
+    if (k === 'wall') { const a = Math.atan2(y, x); return L.wallLo + (L.wallHi - L.wallLo) * ((Math.floor(a / (Math.PI / 12)) & 1) ? 1 : 0); }  // striped wall
     if (k === 'food') return 0.9; if (k === 'bitter') return 0.5; if (k === 'hazard') return 0.6; if (k === 'obst') return 0.12; if (k === 'fly') return 0.08;
     return 0.3;
   };

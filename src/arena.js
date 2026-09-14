@@ -32,6 +32,21 @@ const FLY_CAP = Math.min(MAX_FLIES, Math.max(1, Number(new URLSearchParams(locat
 // chemical synapses -- they are simply never driven by light, so the fly navigates by smell,
 // taste and touch alone. This is a behavioural change, not just an optimisation.
 const NO_VISION = new URLSearchParams(location.search).get('vision') === '0';
+// Arena look. 'circus' is a big-top: black/white checker floor, red/yellow tent stripes,
+// bunting, saturated props. 'lab' is the original muted tan/grey. ?theme=lab to switch back.
+// This is NOT purely cosmetic: the floor and wall albedos in FlyAgent.albedo() are kept in
+// step with these, so a higher-contrast arena drives the photoreceptors harder.
+const THEME = new URLSearchParams(location.search).get('theme') === 'lab' ? 'lab' : 'circus';
+const LOOK = {
+  circus: { floorA: '#12121a', floorB: '#f0ede4', wallA: '#e02128', wallB: '#f6c624',
+            prop: ['#21c8e4', '#ff4fa3', '#9ae62c', '#ff8a2b', '#a45cff', '#2bd9b0'],
+            bunting: ['#21c8e4', '#ff4fa3', '#f6c624', '#9ae62c'], food: '#ffd84d', sky: '#1a0f1e',
+            // relative luminance of the four surfaces above, handed to the flies' albedo()
+            albedo: { floorLo: 0.06, floorHi: 0.92, wallLo: 0.29, wallHi: 0.77 } },
+  lab:    { floorA: '#6f6554', floorB: '#9c907a', wallA: '#2a2a2e', wallB: '#c9c9cf',
+            prop: ['#3d4a3d'], bunting: null, food: '#f2c14e', sky: '#0b0e14',
+            albedo: { floorLo: 0.35, floorHi: 0.60, wallLo: 0.15, wallHi: 0.75 } },
+}[THEME];
 const env = PRESET.env();
 const flies = [];          // {id, worker, group, bodies[], last, color, ready}
 let flyvisMap, shared, meta, bodymap, flyXML, gait, visual, batches, outputPass, running = false, selected = 0, tool = 'none', speed = 2, brainMem, wasmModule, brainParams, neuromodCalib;
@@ -93,7 +108,7 @@ function buildScene(data) {
   renderer.toneMapping = THREE.NoToneMapping;
   renderer.shadowMap.enabled = true; renderer.shadowMap.type = THREE.PCFShadowMap; renderer.shadowMap.autoUpdate = false;
   renderer.info.autoReset = false;
-  scene = new THREE.Scene(); scene.background = new THREE.Color('#0b0e14');
+  scene = new THREE.Scene(); scene.background = new THREE.Color(LOOK.sky);
   scene.matrixAutoUpdate = false;
   const pmrem = new THREE.PMREMGenerator(renderer), room = new RoomEnvironment();
   scene.environment = pmrem.fromScene(room, 0.04).texture; scene.environmentIntensity = 0.24;
@@ -156,19 +171,20 @@ function rebuildEnv() {
   const R = env.arena.radius;
   // floor: same 0.4 cm checker the flies' eyes see
   const cv = document.createElement('canvas'); cv.width = cv.height = 64; const cx = cv.getContext('2d');
-  for (let i = 0; i < 2; i++) for (let j = 0; j < 2; j++) { cx.fillStyle = ((i + j) & 1) ? '#9c907a' : '#6f6554'; cx.fillRect(i * 32, j * 32, 32, 32); }
+  for (let i = 0; i < 2; i++) for (let j = 0; j < 2; j++) { cx.fillStyle = ((i + j) & 1) ? LOOK.floorB : LOOK.floorA; cx.fillRect(i * 32, j * 32, 32, 32); }
   const tex = new THREE.CanvasTexture(cv); tex.wrapS = tex.wrapT = THREE.RepeatWrapping; tex.repeat.set((R + 0.2) * 2 / 0.8, (R + 0.2) * 2 / 0.8); tex.magFilter = THREE.LinearFilter; tex.anisotropy = Math.min(8, renderer.capabilities.getMaxAnisotropy()); tex.colorSpace = THREE.SRGBColorSpace;
   floorMesh = new THREE.Mesh(new THREE.CircleGeometry(R + 0.1, 96), new THREE.MeshStandardMaterial({ map: tex, roughness: 0.95 }));
   floorMesh.receiveShadow = true; envGroup.add(floorMesh);
   // striped wall (24 stripes), matching the visual environment used for the compound eye
   const wc = document.createElement('canvas'); wc.width = 1024; wc.height = 8; const wx = wc.getContext('2d');
-  for (let k = 0; k < 24; k++) { wx.fillStyle = (k & 1) ? '#c9c9cf' : '#2a2a2e'; wx.fillRect(k * 1024 / 24, 0, 1024 / 24 + 1, 8); }
+  for (let k = 0; k < 24; k++) { wx.fillStyle = (k & 1) ? LOOK.wallB : LOOK.wallA; wx.fillRect(k * 1024 / 24, 0, 1024 / 24 + 1, 8); }
   const wt = new THREE.CanvasTexture(wc); wt.colorSpace = THREE.SRGBColorSpace;
   const wall = new THREE.Mesh(new THREE.CylinderGeometry(R + 0.05, R + 0.05, env.arena.wallHeight, 96, 1, true), new THREE.MeshStandardMaterial({ map: wt, side: THREE.BackSide, roughness: 0.9 }));
   wall.rotation.x = Math.PI / 2; wall.position.z = env.arena.wallHeight / 2; envGroup.add(wall);
-  for (const o of env.obstacles) { const m = new THREE.Mesh(o.type === 'box' ? new THREE.BoxGeometry(o.sx * 2, o.sy * 2, o.sz) : new THREE.CylinderGeometry(o.r, o.r, o.sz, 32), new THREE.MeshStandardMaterial({ color: '#3d4a3d', roughness: 0.7 }));
+  if (LOOK.bunting) addBunting(R, env.arena.wallHeight);
+  for (const [i, o] of env.obstacles.entries()) { const m = new THREE.Mesh(o.type === 'box' ? new THREE.BoxGeometry(o.sx * 2, o.sy * 2, o.sz) : new THREE.CylinderGeometry(o.r, o.r, o.sz, 32), new THREE.MeshStandardMaterial({ color: LOOK.prop[i % LOOK.prop.length], roughness: 0.45, metalness: 0.05 }));
     if (o.type !== 'box') m.rotation.x = Math.PI / 2; m.position.set(o.x, o.y, o.sz / 2); m.castShadow = m.receiveShadow = true; envGroup.add(m); }
-  for (const f of env.food) { const m = discMesh(f.r, '#f2c14e', 0.35 + 0.65 * Math.min(1, f.amount / 5)); m.position.set(f.x, f.y, 0.002); m.userData.food = f; envGroup.add(m); }
+  for (const f of env.food) { const m = discMesh(f.r, LOOK.food, 0.35 + 0.65 * Math.min(1, f.amount / 5)); m.position.set(f.x, f.y, 0.002); m.userData.food = f; envGroup.add(m); }
   for (const b of env.bitterPatches) { const m = discMesh(b.r, '#4f8fd6', 0.9); m.position.set(b.x, b.y, 0.002); envGroup.add(m); }
   for (const h of env.hazards) { const m = discMesh(h.r, '#d9502f', 0.9); m.position.set(h.x, h.y, 0.002); envGroup.add(m); const glow = discMesh(h.r + 0.4, '#d9502f', 0.12, 0.001); glow.position.set(h.x, h.y, 0.001); envGroup.add(glow); }
   for (const o of env.odors) { // plume as a soft radial gradient
@@ -176,6 +192,24 @@ function rebuildEnv() {
     const col = o.odor === 'co2' ? '120,200,255' : '190,255,120'; grd.addColorStop(0, `rgba(${col},0.45)`); grd.addColorStop(1, `rgba(${col},0)`); gx.fillStyle = grd; gx.fillRect(0, 0, 128, 128);
     const m = new THREE.Mesh(new THREE.CircleGeometry(o.sigma * 2.2, 48), new THREE.MeshBasicMaterial({ map: new THREE.CanvasTexture(g), transparent: true, depthWrite: false }));
     m.position.set(o.x, o.y, 0.004); envGroup.add(m); }
+}
+// Circus bunting: a ring of triangular pennants hanging just below the top of the wall.
+// Drawn as one alpha-cut texture on a short cylinder band rather than N triangle meshes,
+// so it costs a single draw call and never shows up in the shadow or AO passes.
+function addBunting(R, wallHeight) {
+  const N = 32, W = 1024, H = 64, band = Math.min(0.26, wallHeight * 0.22);
+  const c = document.createElement('canvas'); c.width = W; c.height = H; const g = c.getContext('2d');
+  const step = W / N;
+  for (let k = 0; k < N; k++) {
+    g.fillStyle = LOOK.bunting[k % LOOK.bunting.length];
+    const x = k * step;
+    g.beginPath(); g.moveTo(x, 0); g.lineTo(x + step, 0); g.lineTo(x + step / 2, H * 0.82); g.closePath(); g.fill();
+  }
+  g.fillStyle = '#2a1520'; g.fillRect(0, 0, W, H * 0.09);   // the cord they hang from
+  const t = new THREE.CanvasTexture(c); t.colorSpace = THREE.SRGBColorSpace;
+  const m = new THREE.Mesh(new THREE.CylinderGeometry(R + 0.03, R + 0.03, band, 96, 1, true),
+    new THREE.MeshStandardMaterial({ map: t, side: THREE.BackSide, transparent: true, alphaTest: 0.5, roughness: 0.75 }));
+  m.rotation.x = Math.PI / 2; m.position.z = wallHeight - band / 2 - 0.02; envGroup.add(m);
 }
 function buildFlyMesh(color, sex) {
   const appearance = visual.instantiate(sex);
@@ -214,7 +248,7 @@ async function addFly(pos, yaw, sex = 'm') {
   const f = { id, worker, color, sex, ready: false, last: null, prev: null, stats: {}, ...buildFlyMesh(color, sex) };
   scene.add(f.group); flies.push(f); batches.add(f);
   worker.onmessage = e => onWorker(f, e.data);
-  worker.postMessage({ type: 'init', id, graph: shared, meta, bodymap, flyXML, gait, env, pos, yaw, nProxies: MAX_FLIES - 1, mode: $('#mode').value, brainOpts: brainParams, neuromod: neuromodCalib, vision: !NO_VISION, sex,
+  worker.postMessage({ type: 'init', id, graph: shared, meta, bodymap, flyXML, gait, env, pos, yaw, nProxies: MAX_FLIES - 1, mode: $('#mode').value, brainOpts: brainParams, neuromod: neuromodCalib, vision: !NO_VISION, sex, look: LOOK.albedo,
     brainMem: { memory: brainMem.memory, graph: brainMem.graph, bases: brainMem.bases, opts: brainMem.opts, fv: brainMem.fv }, wasmModule, slot: id, flyvisMap });
   await new Promise(res => { f.onReady = res; });
   if (running) worker.postMessage({ type: 'run' });
