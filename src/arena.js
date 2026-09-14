@@ -180,7 +180,14 @@ async function main() {
   window.__arena = { camera, controls, flies, env, THREE, renderer, scene, gtao, composer, metrics, resolution, batches, visual, addFly, removeFly, renameFly, rebuildEnv, launchThreat, janusSpeak, setLook, LOOKS, theme: THEME, releaseMonster, recallMonster, store, saveAllFlies, saveFlyRecord, PERSIST, FLY_CAP, MAX_FLIES,
     orbDebug: () => ({ presence: orbPresence, glow: orbGlow, until: orbUntil, now: performance.now(), out: orbWasOut, spokeAt: orbSpokeAt }) };
   animate();
-  if (RINGMASTER) window.__ringmaster = startRingmaster(window.__arena);
+  if (RINGMASTER) {
+    window.__ringmaster = startRingmaster(window.__arena);
+    // ?stage=<words> hands Janus a command as soon as the arena is up, so a single URL opens
+    // straight into a scene: ?stage=monster, ?stage=dungeon, ?stage=lava, and so on. Same
+    // parser as the command box, so anything you can type, you can link to.
+    const stage = new URLSearchParams(location.search).get('stage');
+    if (stage) setTimeout(() => window.__ringmaster.command(stage), 2500);
+  }
 }
 
 // ---------------- scene ----------------
