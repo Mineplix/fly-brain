@@ -552,7 +552,99 @@ parallel. Vision is on in all of this; Phase 4 should improve it materially.
 
 ---
 
-## 9. Open questions for later phases
+## 9. Phase 4 — the vision toggle (`?vision=0`)
+
+### 9.1 What it does
+
+`?vision=0` makes every fly blind. Two changes in `src/arena.js`, one commit
+(`Add ?vision=0 to run the flies blind`):
+
+1. **`vision: !NO_VISION`** in the worker `init` message (was hardcoded `true`). In
+   `FlyAgent` this leaves **both** `this.fv` and `this.eye` null. Passing `vision:false`
+   rather than just omitting flyvis matters — with `vision:true` and no flyvis,
+   `fly.js:46` would fall back to `new CompoundEye(...)`, which still raycasts.
+2. **`const vision = NO_VISION ? null : {...}`** before `allocBrainMemory`.
+
+Point 2 is the subtle one, and it is what makes this match the brief's "unstimulated
+rather than deleted". Normally `allocBrainMemory` marks the 62,157 flyvis-driven neurons
+as sensory, and `writeGraph` then **zeroes their incoming chemical synapses** because
+flyvis replaces that input. Passing `null` skips that, so a blind fly keeps an **intact,
+fully wired optic lobe that simply never receives light**. Had we left the mask on, those
+neurons would have been inert — functionally deleted.
+
+Default is off. Vision stays on unless the flag is passed.
+
+Also: the eye panels now paint "vision off" instead of leaving a stale last frame.
+
+### 9.2 Speed-up — ✅ measured, one fly
+
+| | sim-sec per wall-sec | wall-sec per sim-sec |
+|---|---:|---:|
+| vision on | 0.0148 | 68 |
+| **vision off** | **0.0527** | **19** |
+
+**3.6× faster** — better than the ~2× the brief predicted. Plausible in hindsight: the flag
+removes *three* costs at once, not just the neurons — `mj_multiRay` over 1,442 rays, two
+`fv_step` sweeps over 45,669 nodes / 1,513,231 edges at 50 Hz, and the per-step drive of
+62,157 neurons.
+
+⚠️ **Single-fly only.** The 6-fly comparison was not obtained — see 9.4.
+
+### 9.3 What visibly changes in behaviour
+
+Group firing rates, one fly, matched sim time (2652 ms sighted vs 3109 ms blind):
+
+| group (L/R Hz) | vision on | vision off |
+|---|---|---|
+| **Photoreceptors** | 40.40 / 36.02 | **0 / 0** |
+| **Looming detectors** | 1.48 / 2.17 | **0 / 0** |
+| Smell | 7.97 / 6.25 | 7.86 / 5.86 |
+| Walk forward | 14.07 / 14.86 | 7.80 / 10.47 |
+| Grooming | 7.46 / 1.61 | 3.10 / 0.35 |
+| Courtship circuit | 4.34 / 3.05 | 6.57 / 3.28 |
+| Octopamine (hunger) | 5.08 / 0 | 3.39 / 0 |
+| Feeding motor | 2.46 / 0.05 | 2.32 / 0.18 |
+
+- **The optic lobe goes exactly silent** — photoreceptors and looming detectors both to
+  0/0. That is the flag working as specified.
+- **Smell is unchanged** (~8.0/6.0 either way). Good control: the non-visual senses are
+  untouched, so the difference really is vision.
+- **Walk-forward drive drops roughly a third.** Observed behaviour labels: the sighted fly
+  was `walking` (5.4 cm travelled); the blind one was `walking backward` (3.5 cm).
+- Grooming lower, courtship slightly higher blind.
+
+⚠️ **n = 1 run per condition, one sample each.** Photoreceptors/looming going to zero is
+structural and certain. Everything else in that table is *suggestive only* — single-fly,
+single-sample, and the flies start from different random states. Do not treat the
+walk-forward or grooming differences as established without repeats.
+
+📌 **Measurement trap found the hard way:** an early sighted sample at sim-t 356 ms showed
+Courtship at **86/90 Hz**, which looked like a dramatic collapse when vision was removed.
+It was a **startup transient** — at matched sim time it is 4.3/3.1 Hz, i.e. no collapse at
+all. Always compare at matched *simulated* time, not matched wall time. With vision on the
+fly needs ~3 minutes of wall clock to reach 3 simulated seconds.
+
+### 9.4 ⚠️ What was NOT measured, and why
+
+The 6-fly vision-on/vision-off comparison — the number that would actually size the
+multi-fly win — **was not obtained.**
+
+Spawning 6 sighted flies drove free RAM from 6.3 GB to 2.7 GB (Memory Compression 616 MB,
+pagefile 1.45 GB) and the page's main thread stopped responding: trivial synchronous script
+calls timed out, then navigation itself timed out. CPU was only ~24–46%, so this was
+**memory pressure, not compute**.
+
+That is itself a finding worth keeping: on a 16 GB machine, **sighted flies are
+memory-expensive enough that ~6 of them can wedge the tab**, independently of whether the
+CPU could keep up. It also means the Phase 3 ceiling of ~6 flies may be partly a memory
+ceiling rather than purely a bandwidth one.
+
+Outstanding: re-run the 6-fly comparison on a fresh browser with headroom, and check
+whether `?vision=0` raises the Phase 3 knee above 6.
+
+---
+
+## 10. Open questions for later phases
 
 - Does `powerPreference: 'high-performance'` in `lifgpu.js:158` change the picture on the
   4050? If WebGPU on discrete silicon beats 0.043×, the whole Phase 3 calculus changes.
