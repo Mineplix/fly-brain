@@ -752,17 +752,40 @@ obstacle-free. Use `?theme=lab` for a clean arena when running behavioural compa
 The staircase also slightly overlaps the default bitter patch at `(-1.0, -0.7)` — cosmetic
 only, since patches are non-colliding flat discs.
 
-### 10.6 ⚠️ Not visually verified
+### 10.6 ✅ Visually verified
 
-Syntax-checked, and the theme resolution and fallback were unit-tested in Node. **No
-screenshot was taken.** The automation browser wedged under memory pressure (free RAM
-reached 763 MB, with Roblox at 1.4 GB alongside a stuck tab) and two navigations timed out
-at 300 s. Nothing in the rendering path is confirmed working end to end.
+Seen rendering, at 1 fly and at 6. Confirmed on screen:
 
-Three navigation attempts timed out at 300 s each; free RAM was 0.8-1.2 GB throughout, with
-Roblox holding ~2 GB. **Nothing in the circus arena -- floor, stripes, bunting, canopy or
-staircase -- has been seen rendering.** First thing next session: open `arena.html` in a
-real browser and look at it.
+- black/white checker floor, reading cleanly at arena scale
+- red/yellow striped tent wall
+- **tent canopy** closing overhead as a striped cone, panels lining up with the wall stripes
+- **bunting** — the coloured pennant ring under the wall top
+- **spiral staircase** standing on the floor as a red helix
+- saturated props, translucent food / bitter / hazard discs
+- `?vision=0` working end to end: both eye panels read "vision off" and the Photoreceptors
+  group sits at 0.0 / 0.0 Hz while Smell runs at 10.8 / 8.1 Hz
+
+### 10.7 ❗ How the wedged browser was actually recovered
+
+Four `navigate` calls timed out at 300 s each, across two sessions, and freeing memory did
+**not** fix it (still timed out with 2.2 GB free). It was never a memory problem — the
+**CDP connection to that specific tab** was dead.
+
+**The fix: open a new tab and drive that instead.**
+
+```
+tabs_create  ->  tab-1
+navigate(url, tabId: "tab-1")   # works immediately
+```
+
+The wedged tab disappeared once the new one took over. Worth remembering: if a preview tab
+stops responding, a fresh tab costs seconds, whereas retrying navigation on the dead one
+costs 5 minutes per attempt.
+
+📌 Screenshots can also fail with *"the page did not finish rendering in time"* when the
+desktop app window is minimised or hidden — `animate()` early-returns on `document.hidden`,
+so nothing draws and the capture waits forever. Numeric state is still readable via
+`javascript_tool` in that condition; only the image capture is blocked.
 
 ---
 
@@ -817,14 +840,25 @@ Reason: that panel is already a right-hand column with working scroll and fold b
 and a second absolutely-positioned panel is exactly the kind of change that needs to be
 *looked at* — which was not possible. Moving it out later is a CSS change, not a rewrite.
 
-### 11.4 Verification status
+### 11.4 ✅ Verification status
 
-✅ `npm run build` succeeds (1.4 s, all entry points, no errors) — so rollup resolves
-everything and there are no module-level reference errors.
-✅ Source data in `public/data/` confirmed intact afterwards (the `dropUnpacked` plugin
-only touches `dist/`).
-⚠️ **Never seen rendering.** Free RAM was 0.8–1.2 GB with Roblox holding 1.3–2 GB
-throughout; the automation browser stayed wedged across four attempts.
+✅ `npm run build` succeeds (1.4 s, all entry points, no errors).
+✅ Source data in `public/data/` confirmed intact afterwards (`dropUnpacked` only touches
+`dist/`).
+✅ **Seen rendering with 6 flies.** Six labelled rows (`#0`–`#5`), each with its fly's
+colour dot and its own green brain, header reading "6 flies".
+✅ **Round-robin polling confirmed feeding each row independently** — the per-row rates
+read `17.4, 3.4, 10.2, 8.9, 10.5, 10.4 Hz`, i.e. six distinct values, so every fly's trace
+is reaching its own panel rather than one fly's being mirrored six times.
+✅ Canvas sized correctly: 319 × 504 px for 6 rows at `STACK_ROW = 84`.
+
+⚠️ **Open aesthetic question.** At ~82k points in an 84 px row the brains read as fairly
+solid green silhouettes — the *shape* is clear but internal structure is not. The cause is
+that the resting colour `(0.03, 0.09, 0.06)` is itself green, and with normal (not
+additive) blending a dense overlap of resting points fills the silhouette. Darkening rest
+toward black would make individual spikes pop. Not changed, because the reference video's
+panels also read as fairly solid green shapes — so this may already be right. Judge it live
+before tuning.
 
 ---
 
