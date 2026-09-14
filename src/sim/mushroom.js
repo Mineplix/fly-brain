@@ -69,17 +69,40 @@ export function buildMushroomIndex(data, memory, graph) {
   const mbonLocal = new Int32Array(N).fill(-1);
   mbonIds.forEach((id, k) => { mbonLocal[id] = k; });
 
+  // Two ways of splitting MBONs, both derived from the data. A summed population readout cannot
+  // test an association, because MBONs have opposing valences and depressing one group can raise
+  // another -- the sum discards exactly the balance the question is about.
+  //
+  //   mbonSign  : output transmitter. 50 cholinergic (excitatory) vs 47 glutamatergic/GABAergic
+  //               (inhibitory), which is the usual proxy for approach vs avoidance.
+  //   mbonClass : which dopaminergic class innervates the compartment. PPL1 signals punishment
+  //               and PAM signals reward, so +1 marks the 57 aversive-memory compartments and
+  //               -1 the 38 appetitive ones. After aversive training the prediction is specific:
+  //               KC drive should fall in the PPL compartments and not in the PAM ones.
+  const EXC_SIGN = [0, 1, -1, -1, 1, 1, 1, -1];   // by nt index, as in lif.js
+  const mbonSign = new Int8Array(mbonIds.length);
+  const ntArr = data.nt;
+  if (ntArr) mbonIds.forEach((id, k) => { mbonSign[k] = EXC_SIGN[ntArr[id]] | 0; });
+
+  const pplW = new Float64Array(mbonIds.length), pamW = new Float64Array(mbonIds.length);
   const danRow = [], danPtr = [0], danTarget = [], danW = [];
   for (let pre = 0; pre < N; pre++) {
     if (!isDAN[pre]) continue;
+    const ty = types[pre] || '', isPPL = ty.startsWith('PPL'), isPAM = ty.startsWith('PAM');
     const a = gIndptr[pre], b = gIndptr[pre + 1];
     let n = 0;
     for (let k = a; k < b; k++) {
       const m = mbonLocal[gIndices[k]];
       if (m < 0 || gWeights[k] === 0) continue;
+      if (isPPL) pplW[m] += gWeights[k]; else if (isPAM) pamW[m] += gWeights[k];
       danTarget.push(m); danW.push(gWeights[k]); n++;
     }
     if (n) { danRow.push(pre); danPtr.push(danTarget.length); }
+  }
+  const mbonClass = new Int8Array(mbonIds.length);
+  for (let i = 0; i < mbonClass.length; i++) {
+    const p = pplW[i], q = pamW[i];
+    mbonClass[i] = (p + q === 0) ? 0 : (p > 2 * q ? 1 : (q > 2 * p ? -1 : 0));
   }
   // Per-MBON normaliser so a densely innervated MBON is not simply learned faster than a sparse one.
   const danNorm = new Float32Array(mbonIds.length);
@@ -106,6 +129,8 @@ export function buildMushroomIndex(data, memory, graph) {
     danTarget: sab(Uint32Array, danTarget),
     danW: sab(Float32Array, danW),
     danNorm: sab(Float32Array, danNorm),
+    mbonSign: sab(Int8Array, mbonSign),
+    mbonClass: sab(Int8Array, mbonClass),
   };
 }
 
@@ -135,7 +160,7 @@ export class MushroomBody {
     this.danDrive = new Float32Array(index.nMBON);   // phasic dopamine per compartment, recomputed each step
     this.danBase = new Float32Array(index.nMBON);    // slow tonic baseline it is measured against
     this.dirty = false;                  // set once anything is actually learned
-    this.stats = { kcDrive: 0, danDrive: 0, mbonDrive: 0, phasicMax: 0, phasicPeak: 0, gate: 0, popRel: 0, edges: index.nEdges, depressed: 0, meanDepress: 0, maxDepress: 0 };
+    this.stats = { kcDrive: 0, danDrive: 0, mbonDrive: 0, mbonExc: 0, mbonInh: 0, mbonAver: 0, mbonAppet: 0, phasicMax: 0, phasicPeak: 0, gate: 0, popRel: 0, edges: index.nEdges, depressed: 0, meanDepress: 0, maxDepress: 0 };
     this._acc = 0; this._sinceHouse = 0; this._primed = false; this._age = 0; this._popBase = 0; this._popFast = 0; this._warmSum = 0; this._warmN = 0;
   }
 
@@ -241,9 +266,17 @@ export class MushroomBody {
     // recruits, presenting that odour again should drive the MBONs less than it used to.
     let kcT = 0; for (let r = 0; r < kcRow.length; r++) kcT += trace[kcRow[r]];
     let danT = 0; for (let d = 0; d < danRow.length; d++) danT += trace[danRow[d]];
-    const mb = this.ix.mbonIds;
-    let mbT = 0; for (let i = 0; i < mb.length; i++) mbT += trace[mb[i]];
+    const mb = this.ix.mbonIds, msg = this.ix.mbonSign, mcl = this.ix.mbonClass;
+    let mbT = 0, mExc = 0, mInh = 0, mAver = 0, mAppet = 0;
+    for (let i = 0; i < mb.length; i++) {
+      const v = trace[mb[i]];
+      mbT += v;
+      if (msg[i] > 0) mExc += v; else if (msg[i] < 0) mInh += v;
+      if (mcl[i] > 0) mAver += v; else if (mcl[i] < 0) mAppet += v;
+    }
     this.stats.kcDrive = kcT; this.stats.danDrive = danT; this.stats.mbonDrive = mbT;
+    this.stats.mbonExc = mExc; this.stats.mbonInh = mInh;
+    this.stats.mbonAver = mAver; this.stats.mbonAppet = mAppet;
 
     // --- learning: coincidence of KC eligibility trace and compartment dopamine depresses the
     // synapse. Depression (not potentiation) is the established direction at KC->MBON in flies:

@@ -46,14 +46,24 @@ function present(odor, heat) {
 
 /** Advance a given amount of SIMULATED time, averaging MBON drive over the second half. */
 async function phase(label, ms, { measure = false } = {}) {
-  const start = simT(); let sum = 0, n = 0;
+  const start = simT(); let n = 0;
+  const acc = { all: 0, exc: 0, inh: 0, aver: 0, appet: 0 };
   head = label; paint();
   while (simT() - start < ms) {
     await sleep(250);
-    if (measure && simT() - start > ms * 0.4) { const v = fly().last?.mb?.mbon; if (v != null) { sum += v; n++; } }
+    if (measure && simT() - start > ms * 0.4) {
+      const m = fly().last?.mb;
+      if (m) { acc.all += m.mbon; acc.exc += m.mExc; acc.inh += m.mInh; acc.aver += m.mAver; acc.appet += m.mAppet; n++; }
+    }
     head = `${label}  (${((simT() - start) / 1000).toFixed(1)}/${(ms / 1000).toFixed(1)} sim s)`; paint();
   }
-  return n ? sum / n : null;
+  if (!n) return null;
+  const r = {}; for (const k in acc) r[k] = acc[k] / n;
+  // The quantities that can actually express an association: the balance between MBON groups
+  // with opposing valence, and between the punishment- and reward-taught compartments.
+  r.excInh = r.inh > 0 ? r.exc / r.inh : 0;
+  r.averAppet = r.appet > 0 ? r.aver / r.appet : 0;
+  return r;
 }
 
 try {
@@ -71,7 +81,9 @@ try {
   setLearn(false);
   present('vinegar', 0); const preA = await phase('PRE-test  CS+ vinegar', 3000, { measure: true });
   present('geosmin', 0); const preB = await phase('PRE-test  CS- geosmin', 3000, { measure: true });
-  say(`pre   CS+ ${preA.toFixed(2)}   CS- ${preB.toFixed(2)}`);
+  const f2 = x => x.toFixed(2), f3 = x => x.toFixed(3);
+  say(`pre  CS+  all ${f2(preA.all)}  exc/inh ${f3(preA.excInh)}  aver/appet ${f3(preA.averAppet)}`);
+  say(`pre  CS-  all ${f2(preB.all)}  exc/inh ${f3(preB.excInh)}  aver/appet ${f3(preB.averAppet)}`);
 
   setLearn(true);
   present('vinegar', 0.5);
@@ -86,18 +98,33 @@ try {
   present('vinegar', 0); const postA = await phase('POST-test CS+ vinegar', 3000, { measure: true });
   present('geosmin', 0); const postB = await phase('POST-test CS- geosmin', 3000, { measure: true });
 
-  const dA = 100 * (postA - preA) / preA, dB = 100 * (postB - preB) / preB;
-  say(`post  CS+ ${postA.toFixed(2)}   CS- ${postB.toFixed(2)}`);
+  say(`post CS+  all ${f2(postA.all)}  exc/inh ${f3(postA.excInh)}  aver/appet ${f3(postA.averAppet)}`);
+  say(`post CS-  all ${f2(postB.all)}  exc/inh ${f3(postB.excInh)}  aver/appet ${f3(postB.averAppet)}`);
   say('');
-  say(`CS+ change  ${dA >= 0 ? '+' : ''}${dA.toFixed(1)}%   <- punished odour`);
-  say(`CS- change  ${dB >= 0 ? '+' : ''}${dB.toFixed(1)}%   <- safe odour`);
+  const pc = (a, b) => 100 * (b - a) / a;
+  const rows = [['all', pc(preA.all, postA.all), pc(preB.all, postB.all)],
+                ['excitatory', pc(preA.exc, postA.exc), pc(preB.exc, postB.exc)],
+                ['inhibitory', pc(preA.inh, postA.inh), pc(preB.inh, postB.inh)],
+                ['aversive cmpt', pc(preA.aver, postA.aver), pc(preB.aver, postB.aver)],
+                ['appetitive cmpt', pc(preA.appet, postA.appet), pc(preB.appet, postB.appet)],
+                ['exc/inh ratio', pc(preA.excInh, postA.excInh), pc(preB.excInh, postB.excInh)],
+                ['aver/appet ratio', pc(preA.averAppet, postA.averAppet), pc(preB.averAppet, postB.averAppet)]];
+  const sg = x => (x >= 0 ? '+' : '') + x.toFixed(1) + '%';
+  say('readout            CS+(punished)   CS-(safe)   difference');
+  for (const [nm, a, b] of rows) say(`${nm.padEnd(18)} ${sg(a).padStart(8)}  ${sg(b).padStart(10)}  ${sg(a - b).padStart(10)}`);
   say('');
-  const selective = dA < dB - 3;
-  colour = selective ? '#4ade80' : '#fbbf24';
-  head = selective ? 'SELECTIVE: the punished odour lost more' : 'NOT SELECTIVE — see note';
-  say(selective
-    ? 'The memory is odour specific.'
-    : 'Both odours moved together: this is general depression, not an association.');
-  window.__cond = { preA, preB, postA, postB, dA, dB, dep, selective };
+  const dA = pc(preA.averAppet, postA.averAppet), dB = pc(preB.averAppet, postB.averAppet);
+  const diff = dA - dB;
+  const specific = Math.abs(diff) > 5;           // CS+ and CS- moved differently at all
+  const aversive = diff < -5;                    // and in the direction aversive learning predicts
+  colour = aversive ? '#4ade80' : (specific ? '#60a5fa' : '#fbbf24');
+  head = aversive ? 'ODOUR-SPECIFIC, aversive direction'
+       : specific ? 'ODOUR-SPECIFIC, but opposite sign'
+                  : 'NO SELECTIVITY';
+  say(aversive ? 'CS+ shifted away from the aversive compartments, CS- did not.'
+    : specific ? 'CS+ and CS- moved differently, so the change is odour specific -- but the
+punished odour drove the aversive compartments MORE, not less.'
+               : 'CS+ and CS- moved together: general depression, not an association.');
+  window.__cond = { preA, preB, postA, postB, rows, dep, specific, aversive, diff };
   paint();
 } catch (e) { fail(e); }
