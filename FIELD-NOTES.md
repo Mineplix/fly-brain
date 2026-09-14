@@ -1379,6 +1379,7 @@ thermosensory at 0 in both (no hazard) — the two antennal channels stay indepe
 | `?eta=X` | multiply the learning rate (dose-response) |
 | `?persist=0` | don't save or restore flies (use for any benchmark or controlled run) |
 | `?dafloor=X` | phasic-dopamine gate threshold (default 0.15); ALWAYS pair with an unpunished control |
+| `?noci=1` | nociceptive afferents onto PPL1 (OFF by default; an addition beyond the connectome) |
 | `?cond=1` | run the differential-conditioning probe |
 | `?train=N` | training seconds for that probe |
 
@@ -1681,3 +1682,97 @@ good way to wedge the contact solver. It eases to 15% speed within 0.22 cm so it
 than jittering through its target, is clamped inside the wall, and is recalled automatically at
 the end of its hunt and before any scene change — `recallMonster()` runs at the top of
 `runAdventure`, so a beast is never left loose across a restage.
+
+---
+
+## 24. The punishment signal, fixed — and learning that survives a reload
+
+Section 21 ended blocked: aversive stimuli raised dopamine ~11% where the phasic
+gate needs ~68%, and lowering the gate only let noise through. The cause was not
+a constant anywhere.
+
+### The neurons that carry "this hurts" are not in the dataset
+
+Measured on the graph directly, no simulation needed:
+
+    thermosensory -> PPL    0 direct edges,  103 two-hop paths via 46 intermediates
+    gustatory     -> PPL    0 direct edges,   89 two-hop paths via 49 intermediates
+    PPL 24 neurons          PAM 316 neurons
+
+The 25 "thermosensory" neurons are arista cells, which report *preferred*
+temperature (Gallio et al. 2011). They are not nociceptors. Noxious heat and
+mechanical nociception in Drosophila are carried by class IV multidendritic
+neurons, which are peripheral and therefore almost entirely outside a
+central-brain EM volume.
+
+So the route exists but is far too thin: 25 cells, already firing at 100 Hz at
+heat 0.5, reaching 24 PPL neurons over 103 two-hop paths. Nothing tunable was
+going to move that.
+
+> Also note PPL is 24 of 340 DANs -- 7%. A detector summing all dopamine dilutes
+> a real punishment burst by the 316 PAM neurons reporting nothing bad. The
+> detector now runs on the PPL subset (`danClass`), which is correct on its own
+> terms but was NOT the blocker.
+
+### The fix: supply the afferent, flagged and controlled
+
+`senses.js bindNociceptors` drives the PPL1 cluster from noxious intensity (heat
+or bitter, through a Hill function). Same category as the giant-fibre -> TTMn
+electrical synapse the project already adds explicitly because a chemical
+connectome cannot contain it: a sensory channel the volume does not cover, not a
+circuit being puppeted.
+
+**OFF by default (`?noci=1`).** It is an addition beyond the connectome and every
+result depending on it has to say so. The `NOCI` constants are documented as
+chosen, not fitted.
+
+### Validated against its own control
+
+Weights zeroed AFTER settling, then undisturbed rest before any punishment:
+
+| phase | depressed | avRel | gate |
+|---|---|---|---|
+| quiet rest | 0 | -0.020 | 0 |
+| quiet rest | 0 | -0.028 | 0 |
+| quiet rest | 0 | -0.021 | 0 |
+| punished | 3,704 | 0.142 | 0.311 |
+| punished | 4,068 | 0.109 | 0.239 |
+| punished | 4,176 | 0.106 | 0.232 |
+
+Health 1.00 throughout. Zero at rest, 4,176 under punishment.
+
+> ⚠️ An earlier run of this showed 544 edges "at rest". Those accrued during the
+> post-warm-up settling transient, not during rest -- which is why the control
+> resets the weights *after* settling. Reset before settling and you measure your
+> own startup.
+
+### Learning that survives a reload — the original goal, finally met
+
+    naive fly                       0 edges
+    2.5 s sim punishment        3,887 edges, gate 0.39, health 1.00
+    saved                       4,096 non-zero, checksum 1833.1076
+    -- page reload --
+    read from RUNNING worker    4,096 non-zero, checksum 1821.4132, same indices
+
+Same edge count, same indices, `restored: true`. The checksum is 0.6% lower
+because the memory is *decaying*: the mushroom body has a 120 s recovery
+constant, and a fraction of a second of simulated recovery passed between the
+worker seeding the weights and the read-back.
+
+The proof that this is decay rather than corruption is the ratio: the checksum
+fell by 0.99362x and the maximum depression fell from 1.00000 to 0.99362 -- the
+same factor to five decimals, i.e. a uniform multiplicative decay across every
+edge. A partially written or misaligned array would not decay uniformly.
+
+### A throughput trap that cost most of a session
+
+The embedded Browser pane is throttled hard whenever it is not the foreground
+surface. Measured on the same page minutes apart:
+
+    actively polled      0.0366x
+    left alone           0.0009x   (~40x slower)
+
+So `sleep 600` in a shell is the *worst* way to wait for a browser run: the pane
+backgrounds and the workers throttle. Polling the page every ~35 s keeps it
+awake and is dramatically faster in wall time. Several "this is taking forever"
+stretches this session were this, not the simulation.
