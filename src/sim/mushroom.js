@@ -85,7 +85,7 @@ export function buildMushroomIndex(data, memory, graph) {
   if (ntArr) mbonIds.forEach((id, k) => { mbonSign[k] = EXC_SIGN[ntArr[id]] | 0; });
 
   const pplW = new Float64Array(mbonIds.length), pamW = new Float64Array(mbonIds.length);
-  const danRow = [], danPtr = [0], danTarget = [], danW = [];
+  const danRow = [], danPtr = [0], danTarget = [], danW = [], danClass = [];
   for (let pre = 0; pre < N; pre++) {
     if (!isDAN[pre]) continue;
     const ty = types[pre] || '', isPPL = ty.startsWith('PPL'), isPAM = ty.startsWith('PAM');
@@ -97,7 +97,7 @@ export function buildMushroomIndex(data, memory, graph) {
       if (isPPL) pplW[m] += gWeights[k]; else if (isPAM) pamW[m] += gWeights[k];
       danTarget.push(m); danW.push(gWeights[k]); n++;
     }
-    if (n) { danRow.push(pre); danPtr.push(danTarget.length); }
+    if (n) { danRow.push(pre); danPtr.push(danTarget.length); danClass.push(isPPL ? 1 : isPAM ? -1 : 0); }
   }
   const mbonClass = new Int8Array(mbonIds.length);
   for (let i = 0; i < mbonClass.length; i++) {
@@ -125,6 +125,7 @@ export function buildMushroomIndex(data, memory, graph) {
     edgeMbon: sab(Uint32Array, edgeMbon),
     mbonIds: sab(Uint32Array, mbonIds),
     danRow: sab(Uint32Array, danRow),
+    danClass: sab(Int8Array, danClass),   // +1 PPL (punishment), -1 PAM (reward), 0 other
     danPtr: sab(Uint32Array, danPtr),
     danTarget: sab(Uint32Array, danTarget),
     danW: sab(Float32Array, danW),
@@ -161,8 +162,8 @@ export class MushroomBody {
     this.danDrive = new Float32Array(index.nMBON);   // phasic dopamine per compartment, recomputed each step
     this.danBase = new Float32Array(index.nMBON);    // slow tonic baseline it is measured against
     this.dirty = false;                  // set once anything is actually learned
-    this.stats = { kcDrive: 0, danDrive: 0, mbonDrive: 0, mbonExc: 0, mbonInh: 0, mbonAver: 0, mbonAppet: 0, phasicMax: 0, phasicPeak: 0, gate: 0, popRel: 0, edges: index.nEdges, depressed: 0, meanDepress: 0, maxDepress: 0 };
-    this._acc = 0; this._sinceHouse = 0; this._primed = false; this._age = 0; this._popBase = 0; this._popFast = 0; this._warmSum = 0; this._warmN = 0;
+    this.stats = { kcDrive: 0, danDrive: 0, mbonDrive: 0, mbonExc: 0, mbonInh: 0, mbonAver: 0, mbonAppet: 0, phasicMax: 0, phasicPeak: 0, gate: 0, popRel: 0, pop: 0, popFast: 0, popBase: 0, popAv: 0, avRel: 0, edges: index.nEdges, depressed: 0, meanDepress: 0, maxDepress: 0 };
+    this._acc = 0; this._sinceHouse = 0; this._primed = false; this._age = 0; this._popBase = 0; this._popFast = 0; this._warmSum = 0; this._warmN = 0; this._avFast = 0; this._avBase = 0; this._warmSumAv = 0;
   }
 
   /**
@@ -175,7 +176,7 @@ export class MushroomBody {
    * keeps a slow baseline and only the positive deviation teaches.
    */
   _dopamine(dtMs) {
-    const { danRow, danPtr, danTarget, danW, danNorm } = this.ix;
+    const { danRow, danPtr, danTarget, danW, danNorm, danClass } = this.ix;
     const trace = this.brain.trace, dd = this.danDrive, base = this.danBase;
     const g = this.p.danGain, kb = Math.min(1, dtMs / this.p.baseTauMs);
 
@@ -189,10 +190,11 @@ export class MushroomBody {
     // a 20% *fall*. Normalisation still belongs on the per-compartment weighting below, just not
     // on the detector.
     dd.fill(0);
-    let pop = 0;
+    let pop = 0, popAv = 0;
     for (let r = 0; r < danRow.length; r++) {
       const tr = trace[danRow[r]];
       pop += tr;
+      if (danClass && danClass[r] > 0) popAv += tr;   // PPL only: the punishment channel
       if (tr < this.p.danEps) continue;
       for (let k = danPtr[r]; k < danPtr[r + 1]; k++) dd[danTarget[k]] += tr * danW[k];
     }
@@ -205,7 +207,7 @@ export class MushroomBody {
     //    startup. So collect the mean over the warmup window and start both references there.
     this._age += dtMs;
     if (this._age <= this.p.warmupMs) {
-      if (this._age > this.p.warmStartMs) { this._warmSum += pop; this._warmN++; }
+      if (this._age > this.p.warmStartMs) { this._warmSum += pop; this._warmSumAv += popAv; this._warmN++; }
       else { dd.fill(0); return 0; }
       for (let i = 0; i < dd.length; i++) base[i] += dd[i];   // per-compartment sum, averaged below
       dd.fill(0);
@@ -215,6 +217,7 @@ export class MushroomBody {
       const inv = this._warmN ? 1 / this._warmN : 0;
       for (let i = 0; i < base.length; i++) base[i] *= inv;
       this._popFast = this._popBase = this._warmSum * inv;
+      this._avFast = this._avBase = this._warmSumAv * inv;
       this._primed = true;
       dd.fill(0);
       return 0;
@@ -233,8 +236,20 @@ export class MushroomBody {
     this._popBase += (this._popFast - this._popBase) * ks;
     const popRel = this._popBase > 1e-5 ? (this._popFast - this._popBase) / this._popBase : 0;
     this.stats.popRel = popRel;
+    this.stats.pop = pop; this.stats.popFast = this._popFast; this.stats.popBase = this._popBase;
 
-    let gate = (popRel - this.p.phasicFloor) * this.p.phasicGain;
+    // The detector runs on the PPL subset alone. Summing every dopaminergic neuron asks "is
+    // there more dopamine than usual", which cannot distinguish reward from punishment: PPL1
+    // signals punishment and PAM signals reward (Aso et al. 2014), and PAM is by far the larger
+    // population, so a genuine PPL burst is diluted by hundreds of neurons that are not
+    // reporting anything bad. This rule depresses KC->MBON synapses, which is aversive learning,
+    // so the aversive channel is the one it must listen to.
+    this._avFast += (popAv - this._avFast) * kf;
+    this._avBase += (this._avFast - this._avBase) * ks;
+    const avRel = this._avBase > 1e-5 ? (this._avFast - this._avBase) / this._avBase : 0;
+    this.stats.popAv = popAv; this.stats.avRel = avRel;
+
+    let gate = (avRel - this.p.phasicFloor) * this.p.phasicGain;
     if (gate > 1) gate = 1;
     this.stats.gate = gate > 0 ? gate : 0;
 

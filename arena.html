@@ -80,6 +80,18 @@
      Injects a tag rather than using import(): a dynamic import of a public/ file is not in Vite's
      module graph, so it fails transform and the whole inline script 500s. -->
 <script>
+  // ?arousal=1 runs the persistent-defensive-arousal paradigm from public/arousal.js.
+  // Same tag-injection trick as the conditioning probe below, for the same reason.
+  if (new URLSearchParams(location.search).get('arousal') === '1') {
+    var __a = setInterval(function () {
+      if (!window.__arena) return;
+      clearInterval(__a);
+      var s = document.createElement('script');
+      s.type = 'module'; s.src = '/arousal.js';
+      s.onerror = function () { alert('arousal.js failed to load'); };
+      document.head.appendChild(s);
+    }, 500);
+  }
   if (new URLSearchParams(location.search).get('cond') === '1') {
     var __c = setInterval(function () {
       if (!window.__arena) return;
