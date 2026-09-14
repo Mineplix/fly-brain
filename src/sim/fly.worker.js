@@ -21,6 +21,15 @@ onmessage = async (e) => {
       pos: m.pos, yaw: m.yaw, nProxies: m.nProxies, mode: m.mode, brainOpts: m.brainOpts, vision: m.vision, neuromod: { calib: m.neuromod }, sex: m.sex, look: m.look, mushroom: m.mushroom, learn: m.learn, etaMul: m.etaMul });
     meter = new GroupMeter(buildGroups(m.bodymap, data.meta.types, data.side), g.N);
     proxyIds = Array.from({ length:m.nProxies }, (_,k) => fly.model.body_mocapid[fly.model.body(`proxy${k}`).id]);
+    // A saved brain: the mushroom-body depression array from a previous session. Length is
+    // checked here as well as in flystore, because loading a wrong-length overlay would index
+    // a different edge list and quietly scramble every learned weight.
+    if (m.mbState && fly.mb) {
+      const src = new Float32Array(m.mbState);
+      if (src.length === fly.mb.depress.length) { fly.mb.depress.set(src); fly.mb.dirty = true; }
+      else console.warn(`[fly ${m.id}] saved brain has ${src.length} edges, this index has ${fly.mb.depress.length} -- ignored`);
+    }
+    if (m.restore) { if (typeof m.restore.energy === 'number') fly.energy = m.restore.energy; if (typeof m.restore.health === 'number') fly.health = m.restore.health; }
     postMessage({ type: 'ready', id: m.id, nbody: fly.model.nbody, bodyNames: [...Array(fly.model.nbody).keys()].map(i => fly.model.body(i).name), wingPoses: fly.flight.wingPoses(mj) });
     postPose();
     if (running) { lastReal = performance.now(); loop(); }
@@ -33,6 +42,24 @@ onmessage = async (e) => {
   else if (m.type === 'stimulate') fly.brain.setDrive(m.indices, m.rate);
   else if (m.type === 'learn') { if (fly.mb) fly.mb.learn = !!m.on; }
   else if (m.type === 'mbreset') { fly.mb?.reset(); if (fly.mb) fly.mb.stats.phasicPeak = 0; }
+  // Hand the learned mushroom-body weights back for saving. A copy is transferred, so the
+  // running overlay is untouched and the main thread pays no structured-clone cost.
+  else if (m.type === 'exportmb') {
+    const buf = fly?.mb ? fly.mb.depress.slice(0).buffer : null;
+    postMessage({ type: 'mb', id: fly?.id, token: m.token, mb: buf, dirty: !!fly?.mb?.dirty, simMs: fly?.t || 0,
+      energy: fly?.energy, health: fly?.health, pos: fly ? [fly.mjd.xpos[fly.bid.thorax * 3], fly.mjd.xpos[fly.bid.thorax * 3 + 1]] : null },
+      buf ? [buf] : []);
+  }
+  else if (m.type === 'probe') {
+    const M = fly.model, d = fly.mjd; let gid = -1;
+    for (let g = 0; g < M.ngeom; g++) if (M.geom(g).name === 'janus_geom') gid = g;
+    const jm = fly.janusMocap;
+    postMessage({ type: 'probe', gid, kind: gid >= 0 ? fly.geomKind[gid] : null, mocapId: jm,
+      mocapPos: [d.mocap_pos[jm*3], d.mocap_pos[jm*3+1], d.mocap_pos[jm*3+2]],
+      geomPos: gid >= 0 ? [d.geom_xpos[gid*3], d.geom_xpos[gid*3+1], d.geom_xpos[gid*3+2]] : null,
+      envJanus: fly.env.janus, albedo: gid >= 0 ? fly.albedo(gid, 0, 0) : null,
+      nmocap: M.nmocap, hits: fly.fv ? (() => { const gv = fly.fv.gid.GetView(); let n = 0; for (let i = 0; i < gv.length; i++) if (gv[i] === gid) n++; return n; })() : 'no-fv' });
+  }
   else if (m.type === 'takeoff') { fly.requestTakeoff(); postPose(); }
   else if (m.type === 'activity') {
     const eyes = fly.fv ? fly.fv.lumEye.map(e => e.slice(0)) : null;

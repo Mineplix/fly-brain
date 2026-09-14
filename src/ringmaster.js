@@ -182,6 +182,11 @@ export function startRingmaster(arena, { period = 75000, onLine = null } = {}) {
     nameEl.textContent = 'Janus';
     textEl.textContent = text;
     el.classList.add('on');
+    // The orb only materialises when Janus is actually doing something TO the flies -- staging
+    // an adventure, reacting to a behaviour, answering a command (priority >= 1). Idle musings
+    // still appear in the banner but leave the ring empty, so the orb stays an event rather
+    // than scenery, and the flies' visual input stays clean between scenarios.
+    if (priority >= 1) arena.janusSpeak?.(hideAt - now + 1400);
     onLine?.(text);
   }
 

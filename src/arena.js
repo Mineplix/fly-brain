@@ -14,11 +14,12 @@ import { allocBrainMemory, MAX_FLIES } from './brainsetup.js';
 import { parseFlyVis } from './flyvis.js';
 import { buildGroups } from './sim/groups.js';
 import { startRingmaster } from './ringmaster.js';
+import * as store from './flystore.js';
 import { buildMushroomIndex } from './sim/mushroom.js';
 const BASE = import.meta.env.BASE_URL; // "/" in dev, "/fly-brain/" on GitHub Pages
 
 const $ = s => document.querySelector(s);
-const status = s => { $('#status').textContent = s; };
+const status = s => { const el = $('#status'); if (el) el.textContent = s; else console.info(s); };
 const FLY_COLORS = ['#ffb347', '#5ac8fa', '#a3e635', '#f472b6', '#c084fc', '#facc15', '#fb7185', '#2dd4bf'];
 const presetKey = new URLSearchParams(location.search).get('env') || 'foraging';
 const PRESET = PRESETS[presetKey] || PRESETS.foraging;
@@ -44,6 +45,12 @@ const LEARN = new URLSearchParams(location.search).get('learn') !== '0';
 // ?eta=X scales the mushroom-body learning rate, for dose-response tests. If an effect is real
 // it should grow with the dose; if it does not, it was not the learning producing it.
 const ETA_MUL = Math.max(0, Number(new URLSearchParams(location.search).get('eta')) || 1);
+// Persistent flies. Each fly's learned mushroom-body weights are kept locally (IndexedDB,
+// keyed by the fly's name) and restored next time the page opens, so the flies you had are
+// the flies you get back rather than a fresh set of naive ones.
+// ?persist=0 gives a clean, unsaved session -- which is what you want for a benchmark or a
+// controlled run, since a fly that remembers the last experiment is not a naive subject.
+let PERSIST = new URLSearchParams(location.search).get('persist') !== '0' && LEARN;
 // Arena look. 'circus' is a big-top: black/white checker floor, red/yellow tent stripes,
 // bunting, saturated props. 'lab' is the original muted tan/grey. ?theme=lab to switch back.
 // This is NOT purely cosmetic: the floor and wall albedos in FlyAgent.albedo() are kept in
@@ -55,10 +62,11 @@ const LOOK = {
             bunting: ['#21c8e4', '#ff4fa3', '#f6c624', '#9ae62c'], food: '#ffd84d', sky: '#1a0f1e',
             tent: true, stair: { x: -1.3, y: -1.3, color: '#e02128', pole: '#8e1118' },
             // relative luminance of the four surfaces above, handed to the flies' albedo()
+            orb: '#ff2318', orbGlow: '#ff6a4a',
             albedo: { floorLo: 0.06, floorHi: 0.92, wallLo: 0.29, wallHi: 0.77 } },
   lab:    { floorA: '#6f6554', floorB: '#9c907a', wallA: '#2a2a2e', wallB: '#c9c9cf',
             prop: ['#3d4a3d'], bunting: null, food: '#f2c14e', sky: '#0b0e14',
-            tent: false, stair: null,
+            tent: false, stair: null, orb: '#ff2318', orbGlow: '#ff6a4a',
             albedo: { floorLo: 0.35, floorHi: 0.60, wallLo: 0.15, wallHi: 0.75 } },
 }[THEME];
 // Ringmaster: narrates the flies and restages the arena between "adventures". On by default
@@ -125,11 +133,25 @@ async function main() {
   buildUI();
   $('#loading').remove();
   const st0 = PRESET.start || [0, 0, 0];
-  if (PRESET.flySpots) for (const s of PRESET.flySpots.slice(0, FLY_CAP)) await addFly(s.pos, s.yaw, s.sex);
-  else { await addFly([st0[0], st0[1]], st0[2]);
-    for (let k = 1; k < Math.min(PRESET.flies || 1, FLY_CAP); k++) { const ang = k * 2.4; await addFly([1.2 * Math.cos(ang), 1.2 * Math.sin(ang)], ang + Math.PI); } }
+  // Last session's flies come back first, with the brains they learned. Only if there are none
+  // saved do we fall back to the preset's naive starting cast.
+  // One tab owns the saved flies; a second tab of the same app runs read-only so the two
+  // cannot overwrite each other's animals on their autosave timers.
+  if (PERSIST && !await store.claimStore()) {
+    PERSIST = false;
+    console.warn('[flystore] another tab already owns the saved flies -- persistence off for this tab.');
+  }
+  const restored = await restoreFlies();
+  if (!restored) {
+    if (PRESET.flySpots) for (const s of PRESET.flySpots.slice(0, FLY_CAP)) await addFly(s.pos, s.yaw, s.sex);
+    else { await addFly([st0[0], st0[1]], st0[2]);
+      for (let k = 1; k < Math.min(PRESET.flies || 1, FLY_CAP); k++) { const ang = k * 2.4; await addFly([1.2 * Math.cos(ang), 1.2 * Math.sin(ang)], ang + Math.PI); } }
+  }
+  startAutosave();
+  startOrbTicker();
   if (PRESET.autoThreat) setInterval(() => { if (!running || !flies.length) return; const live = flies.filter(f => f.last?.alive !== false); if (!live.length) return; selected = live[Math.floor(Math.random() * live.length)].id; launchThreat(); }, PRESET.autoThreat * 1000);
-  window.__arena = { camera, controls, flies, env, THREE, renderer, scene, gtao, composer, metrics, resolution, batches, visual, addFly, rebuildEnv, launchThreat, FLY_CAP, MAX_FLIES };
+  window.__arena = { camera, controls, flies, env, THREE, renderer, scene, gtao, composer, metrics, resolution, batches, visual, addFly, removeFly, renameFly, rebuildEnv, launchThreat, janusSpeak, store, saveAllFlies, saveFlyRecord, PERSIST, FLY_CAP, MAX_FLIES,
+    orbDebug: () => ({ presence: orbPresence, glow: orbGlow, until: orbUntil, now: performance.now(), out: orbWasOut, spokeAt: orbSpokeAt }) };
   animate();
   if (RINGMASTER) window.__ringmaster = startRingmaster(window.__arena);
 }
@@ -398,20 +420,40 @@ let nextSlot = 0;
 const freeSlots = [];
 const takeSlot = () => (freeSlots.length ? freeSlots.shift() : nextSlot++);
 
-async function addFly(pos, yaw, sex = 'm') {
+/**
+ * @param {object} [saved] a record from flystore: name, colour, sex and the learned
+ *   mushroom-body weights of a fly from a previous session. Passing it restores that animal
+ *   rather than creating a naive one.
+ */
+async function addFly(pos, yaw, sex = 'm', saved = null) {
   if (flies.length >= FLY_CAP) { alert(`Fly limit reached: ${FLY_CAP}. Delete one first.`); return; }
-  const id = takeSlot(), color = FLY_COLORS[id % FLY_COLORS.length];
+  const id = takeSlot();
+  const color = saved?.color || FLY_COLORS[id % FLY_COLORS.length];
+  if (saved?.sex) sex = saved.sex;
+  const name = saved?.name || uniqueFlyName(id);
   const worker = new Worker(new URL('./sim/fly.worker.js', import.meta.url), { type: 'module' });
-  const f = { id, slot: id, name: `Fly ${id}`, worker, color, sex, ready: false, last: null, prev: null, stats: {}, ...buildFlyMesh(color, sex) };
+  const f = { id, slot: id, name, worker, color, sex, ready: false, last: null, prev: null, stats: {},
+    createdAt: saved?.createdAt || Date.now(), restored: !!saved?.mb, stale: !!saved?.stale, ...buildFlyMesh(color, sex) };
   scene.add(f.group); flies.push(f); batches.add(f); stackAddFly(id);
   worker.onmessage = e => onWorker(f, e.data);
   worker.postMessage({ type: 'init', id, graph: shared, meta, bodymap, flyXML, gait, env, pos, yaw, nProxies: MAX_FLIES - 1, mode: $('#mode').value, brainOpts: brainParams, neuromod: neuromodCalib, vision: !NO_VISION, sex, look: LOOK.albedo,
-    brainMem: { memory: brainMem.memory, graph: brainMem.graph, bases: brainMem.bases, opts: brainMem.opts, fv: brainMem.fv }, wasmModule, slot: id, flyvisMap, mushroom, learn: LEARN, etaMul: ETA_MUL });
+    brainMem: { memory: brainMem.memory, graph: brainMem.graph, bases: brainMem.bases, opts: brainMem.opts, fv: brainMem.fv }, wasmModule, slot: id, flyvisMap, mushroom, learn: LEARN, etaMul: ETA_MUL,
+    mbState: saved?.mb || null, restore: saved ? { energy: saved.energy, health: saved.health } : null },
+    saved?.mb ? [saved.mb] : []);
   await new Promise(res => { f.onReady = res; });
   if (running) worker.postMessage({ type: 'run' });
   worker.postMessage({ type: 'speed', speed });
+  if (PERSIST) saveFlyRecord(f, { force: true });
   renderFlyList();
   return f;
+}
+
+/** "Fly 3", or "Fly 3 (2)" if a saved fly already owns that name. Names key the store. */
+function uniqueFlyName(id) {
+  const taken = new Set(flies.map(x => x.name));
+  let n = `Fly ${id}`;
+  for (let k = 2; taken.has(n); k++) n = `Fly ${id} (${k})`;
+  return n;
 }
 
 /** Remove a fly for good: kill its worker, free its GPU/CPU resources and recycle its slot. */
@@ -431,6 +473,7 @@ function removeFly(id) {
   shadowDirty = true; batches.dirty = true;
   broadcastOthers(true);                      // stop the survivors sensing a ghost proxy
   renderFlyList(); stackLabels(true);
+  if (PERSIST) store.deleteFly(f.name).catch(e => console.warn('[flystore] delete failed', e));
   window.__ringmaster?.say(`${f.name} has left the circus. Do not ask where.`, { priority: 2 });
   return true;
 }
@@ -438,12 +481,18 @@ function removeFly(id) {
 function renameFly(id, name) {
   const f = flies.find(x => x.id === id);
   if (!f) return false;
+  const was = f.name;
   f.name = String(name).trim().slice(0, 24) || `Fly ${id}`;
+  // The name is the key its brain is filed under, so renaming the fly renames its record.
+  if (PERSIST && f.name !== was) store.renameStored(was, f.name)
+    .then(ok => { if (!ok) saveFlyRecord(f, { force: true }); })
+    .catch(e => console.warn('[flystore] rename failed', e));
   renderFlyList(); stackLabels(true);
   if (id === selected) $('#bpTitle').innerHTML = `Inside ${f.name} <i style="display:inline-block;width:8px;height:8px;border-radius:50%;background:${f.color}"></i>`;
   return true;
 }
 function onWorker(f, m) {
+  if (m.type === 'mb') { f.mbPending?.get(m.token)?.(m); f.mbPending?.delete(m.token); return; }
   if (m.type === 'ready') { f.ready = true; f.bodyNames = m.bodyNames; f.bodyGroups = m.bodyNames.map(n => f.bodies[n] || null); buildWingBlur(f, m.wingPoses); f.onReady?.(); }
   else if (m.type === 'pose') {
     f.prev = f.last; f.last = m; shadowDirty = true;
@@ -472,8 +521,43 @@ function syncEnv() { for (const f of flies) if (f.ready) f.worker.postMessage({ 
 // ---------------- UI ----------------
 function buildUI() {
   $('#play').onclick = () => { running = !running; for (const f of flies) f.worker.postMessage({ type: running ? 'run' : 'pause' }); $('#play').textContent = running ? '❚❚ Pause' : '▶ Run'; };
-  $('#addFly').onclick = () => { const a = Math.random() * Math.PI * 2, r = Math.random() * env.arena.radius * 0.6; addFly([r * Math.cos(a), r * Math.sin(a)], Math.random() * Math.PI * 2); };
-  $('#addFemale').onclick = () => { const a = Math.random() * Math.PI * 2, r = Math.random() * env.arena.radius * 0.6; addFly([r * Math.cos(a), r * Math.sin(a)], Math.random() * Math.PI * 2, 'f'); };
+  const spawnAt = () => { const a = Math.random() * Math.PI * 2, r = Math.random() * env.arena.radius * 0.6; return [[r * Math.cos(a), r * Math.sin(a)], Math.random() * Math.PI * 2]; };
+  // The name is asked for up front because it is the key this fly's saved brain is filed
+  // under; renaming later moves the record, but naming it now is what you actually want.
+  const spawnNamed = async sex => {
+    if (flies.length >= FLY_CAP) { alert(`Fly limit reached: ${FLY_CAP}. Delete one first.`); return; }
+    const [pos, yaw] = spawnAt();
+    let name = null;
+    if (PERSIST) {
+      name = prompt('Name this fly (its brain is saved under this name):', uniqueFlyName(nextSlot));
+      if (name === null) return;
+      name = String(name).trim().slice(0, 24);
+      if (flies.some(x => x.name === name)) { alert(`"${name}" is already in the ring. Pick another name.`); return; }
+      const existing = name ? await store.loadFly(name, MB_SIG()) : null;
+      if (existing && !confirm(`"${name}" already has a saved brain (${(existing.simMs / 1000).toFixed(0)} s of experience). Bring that fly back?`)) return;
+      if (existing) { await addFly(pos, yaw, existing.sex || sex, existing); return; }
+    }
+    await addFly(pos, yaw, sex, name ? { name, sex } : null);
+  };
+  $('#addFly').onclick = () => spawnNamed('m');
+  $('#addFemale').onclick = () => spawnNamed('f');
+  $('#importFly').hidden = !PERSIST;
+  $('#importFly').onclick = () => $('#importFile').click();
+  $('#importFile').onchange = async ev => {
+    const file = ev.target.files?.[0]; ev.target.value = '';
+    if (!file) return;
+    try {
+      const rec = await store.decodeFly(file);
+      if (flies.some(x => x.name === rec.name)) { alert(`"${rec.name}" is already in the ring.`); return; }
+      if (rec.mb && rec.mbSig !== MB_SIG()) {
+        if (!confirm(`"${rec.name}" was saved against a different mushroom-body index (${rec.mbSig}, this build is ${MB_SIG()}). Its learned weights cannot be applied. Add it naive?`)) return;
+        rec.mb = null;
+      }
+      await store.saveFly(rec);
+      const a = Math.random() * Math.PI * 2, r = Math.random() * env.arena.radius * 0.6;
+      await addFly([r * Math.cos(a), r * Math.sin(a)], Math.random() * Math.PI * 2, rec.sex || 'm', rec);
+    } catch (e) { alert(`Could not read that file: ${e.message}`); }
+  };
   $('#speed').oninput = e => { speed = +e.target.value; $('#speedv').textContent = speed.toFixed(2) + '×'; for (const f of flies) f.worker.postMessage({ type: 'speed', speed }); };
   $('#preset').innerHTML = Object.entries(PRESETS).map(([k, p]) => `<option value="${k}" ${k === presetKey ? 'selected' : ''}>${p.label}</option>`).join('');
   $('#preset').onchange = e => { location.search = '?env=' + e.target.value; };
@@ -525,7 +609,7 @@ function renderFlyList() {
   $('#flies').innerHTML = flies.map(f => { const s = f.last || {}; const e = s.energy ?? 0, h = s.health ?? 1;
     return `<div class="fly ${f.id === selected ? 'sel' : ''}" data-id="${f.id}"><i class="dot" style="background:${f.color}"></i>
       <div>${f.sex === 'f' ? '♀' : '♂'} ${f.name} <span style="color:var(--acc)">${s.behavior || ''}</span><div class="bar"><i style="width:${e * 100}%;background:#f2c14e"></i></div><div class="bar"><i style="width:${h * 100}%;background:#4ade80"></i></div></div>
-      <span class="flyact"><button class="mini ren" title="Rename">✎</button><button class="mini del" title="Remove this fly">✕</button></span>
+      <span class="flyact">${PERSIST ? `<button class="mini exp" title="Save this fly's brain to a file">⇩</button>` : ''}<button class="mini ren" title="Rename">✎</button><button class="mini del" title="Remove this fly">✕</button></span>
       <span style="color:var(--dim)">${s.t ? (s.t / 1000).toFixed(1) + 's' : '…'}</span></div>`; }).join('');
   $('#flies').querySelectorAll('.fly').forEach(el => {
     const id = +el.dataset.id;
@@ -535,7 +619,11 @@ function renderFlyList() {
       const n = prompt('Name this fly:', f.name); if (n !== null) renameFly(id, n); };
     el.querySelector('.del').onclick = ev => { ev.stopPropagation();
       const f = flies.find(x => x.id === id); if (!f) return;
-      if (confirm(`Remove ${f.name}? Its worker is terminated and the slot is freed for a new fly.`)) removeFly(id); };
+      if (confirm(`Remove ${f.name}? Its worker is terminated, its saved brain is deleted, and the slot is freed for a new fly.`)) removeFly(id); };
+    el.querySelector('.exp')?.addEventListener('click', async ev => { ev.stopPropagation();
+      const f = flies.find(x => x.id === id); if (!f) return;
+      await saveFlyRecord(f, { force: true });      // write the live brain before exporting it
+      if (!await store.exportFly(f.name)) alert(`No saved brain for ${f.name} yet.`); });
   });
   const f = flies.find(x => x.id === selected); $('#selsec').hidden = !f;
   $('#takeoff').textContent = f?.last?.takeoffPending ? (running ? 'Takeoff queued' : 'Takeoff queued · press Run') : 'Activate takeoff DNs';
@@ -626,6 +714,213 @@ function updateThreat() {
   threatMesh.visible = true; threatMesh.position.set(...pos); env.threat = { x: pos[0], y: pos[1], z: pos[2] };
   for (const fl of flies) if (fl.ready) fl.worker.postMessage({ type: 'env', env: { threat: env.threat } });
 }
+
+// ---------------- Janus: the ringmaster as a red glowing orb the flies can actually see ----------------
+// This is not scenery. world.js gives every fly a non-colliding `janus` mocap sphere in the eyes'
+// ray group, fly.js gives it an emissive albedo, and the position below is mirrored into each
+// worker at 20 Hz -- flyvis resamples at 50 Hz, so that is faster than the eye can resolve. The
+// orb therefore appears in the 721-column luminance image, drives the optic lobe, and is a
+// small bright moving object of exactly the kind LC10 responds to.
+// maxStay/cooldown keep the orb punctuation rather than furniture: Janus reacts to the flies
+// often enough that, ungated, a busy stretch would hold it in the air continuously. It stays
+// for at most one visit, then keeps out of the ring for a while whatever Janus is saying.
+const ORB = { r: 0.16, hover: 0.85, drift: 0.55, driftS: 0.09, bobS: 0.5, bob: 0.10,
+              fadeIn: 450, fadeOut: 1100, maxStay: 11000, cooldown: 16000 };
+let orbGroup = null, orbCore = null, orbHalo = [], orbLight = null;
+const ORB_DIM = new THREE.Color('#b40d10'), ORB_HOT = new THREE.Color('#ff3a1e');
+let orbPresence = 0, orbGlow = 0, orbUntil = 0, orbSpokeAt = -1e9, orbSynced = 0, orbHere = null, orbWasOut = true, orbLastNow = 0;
+let orbArrived = 0, orbLeftAt = -1e9;
+
+function buildOrb() {
+  orbGroup = new THREE.Group(); orbGroup.visible = false;
+  // Unlit and untone-mapped: a lit material with a high emissive drives the bloom straight to
+  // white and the orb reads pink. Basic material + an explicit colour ramp keeps it red, and
+  // the brightness is carried by the additive shells instead.
+  orbCore = new THREE.Mesh(new THREE.SphereGeometry(ORB.r, 32, 24),
+    new THREE.MeshBasicMaterial({ color: LOOK.orb, transparent: true, toneMapped: false }));
+  orbGroup.add(orbCore);
+  // two additive shells make the bloom read as a glow rather than a flat ball
+  orbHalo = [1.55, 2.6].map((k, i) => {
+    const m = new THREE.Mesh(new THREE.SphereGeometry(ORB.r * k, 24, 16),
+      new THREE.MeshBasicMaterial({ color: LOOK.orbGlow, transparent: true, opacity: i ? 0.10 : 0.22,
+        blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.BackSide, toneMapped: false }));
+    orbGroup.add(m); return m;
+  });
+  // Units are centimetres and the whole arena is r = 2.5, so a metre-scale lamp washes the
+  // entire ring red. Range is kept under half a centimetre-ish of useful falloff and the
+  // intensity low: the orb should pool light on what is directly beneath it, not gel the set.
+  orbLight = new THREE.PointLight(LOOK.orb, 0.20, 1.1, 2);   // no shadow map: it lights the ring, it does not cast
+  orbGroup.add(orbLight);
+  scene.add(orbGroup);
+}
+
+/** Centroid of the living flies, so Janus materialises among them rather than at a fixed mark. */
+function flyCentroid() {
+  let n = 0, x = 0, y = 0;
+  for (const f of flies) if (f.last && f.last.alive !== false) { x += f.last.pos[0]; y += f.last.pos[1]; n++; }
+  return n ? [x / n, y / n] : [0, 0];
+}
+
+/**
+ * Janus speaks: the orb winks into being above the flies for the length of the line, then fades.
+ * It is absent the rest of the time -- parked below the world, out of the eye rays entirely.
+ * @param {number} holdMs how long to stay before fading out
+ */
+function janusSpeak(holdMs = 4200) {
+  if (!RINGMASTER) return;
+  const now = performance.now();
+  const here = orbPresence > 0.02 || !orbWasOut;
+  if (!here && now - orbLeftAt < ORB.cooldown) return;   // it just left; let the ring breathe
+  if (!here) {                        // arriving: pick a fresh spot among the flies
+    const [cx, cy] = flyCentroid(), a = Math.random() * Math.PI * 2, R = 0.9;
+    orbHere = { x: cx + R * Math.cos(a), y: cy + R * Math.sin(a), phase: Math.random() * 100 };
+    orbArrived = now;
+  }
+  orbSpokeAt = now;
+  // A later line can extend the visit, but never past maxStay from when it arrived.
+  orbUntil = Math.min(orbArrived + ORB.maxStay, Math.max(orbUntil, now + Math.max(1200, holdMs)));
+}
+
+/**
+ * Take the orb out of the world: hidden, and env.janus cleared so every worker parks its mocap
+ * sphere below the floor and the eye rays stop hitting it.
+ *
+ * This must also happen when the page is hidden. animate() early-returns on document.hidden, so
+ * without it the orb would freeze mid-flight and every fly would go on seeing a bright object
+ * hanging motionless in the air for as long as the tab stayed in the background -- which would
+ * quietly contaminate exactly the long unattended runs this is meant to support.
+ */
+function retireOrb() {
+  if (orbWasOut) return;
+  orbWasOut = true; orbPresence = 0; orbGlow = 0; orbUntil = 0; orbLeftAt = performance.now();
+  if (orbGroup) orbGroup.visible = false;
+  env.janus = null;
+  for (const fl of flies) if (fl.ready) fl.worker.postMessage({ type: 'env', env: { janus: null } });
+}
+
+// The orb is driven by BOTH the render loop and this timer, and integrates on measured elapsed
+// time, so calling it more often only makes it smoother. That matters because requestAnimationFrame
+// stops when the page is backgrounded while the fly workers keep simulating: driven by rAF alone,
+// a backgrounded orb would freeze in mid-air and every fly would go on seeing a bright stationary
+// object indefinitely. The timer keeps retiring and moving it even at the 1 Hz a throttled tab gets.
+let orbTicker = null;
+function startOrbTicker() { if (RINGMASTER && !orbTicker) orbTicker = setInterval(() => updateOrb(performance.now()), 100); }
+
+function updateOrb(now) {
+  if (!RINGMASTER) return;
+  if (!orbGroup) buildOrb();
+  const present = now < orbUntil;
+  // presence drives both the render and what the flies see: arriving and leaving are gradual,
+  // so the optic lobe sees a brightening/dimming object rather than one that teleports.
+  const dt = Math.min(100, now - (orbLastNow || now)); orbLastNow = now;
+  orbPresence = Math.max(0, Math.min(1, orbPresence + dt / (present ? ORB.fadeIn : -ORB.fadeOut)));
+  if (orbPresence <= 0 && !present) { retireOrb(); return; }
+  orbWasOut = false; orbGroup.visible = true;
+  const t = now / 1000, ph = orbHere?.phase || 0;
+  // flare for ~1.6 s after each line, over a resting shimmer
+  const since = (now - orbSpokeAt) / 1600;
+  const flare = since >= 0 && since < 1 ? (1 - since) ** 2 : 0;
+  const target = Math.min(1, 0.25 + 0.12 * Math.sin(t * 2.7) + 0.75 * flare) * orbPresence;
+  orbGlow += (target - orbGlow) * 0.12;
+  // a small slow drift around where it arrived, so it reads as hovering with the flies
+  const a = (t + ph) * ORB.driftS * Math.PI * 2;
+  const x = (orbHere?.x || 0) + ORB.drift * Math.cos(a), y = (orbHere?.y || 0) + ORB.drift * 0.6 * Math.sin(2 * a);
+  const z = ORB.hover + ORB.bob * Math.sin((t + ph) * ORB.bobS * Math.PI * 2);
+  orbGroup.position.set(x, y, z);
+  const s = (0.25 + 0.75 * orbPresence) * (1 + 0.10 * orbGlow);
+  orbCore.scale.setScalar(s); orbCore.material.opacity = orbPresence;
+  orbCore.material.color.copy(ORB_DIM).lerp(ORB_HOT, orbGlow);   // deep red at rest, hot red when it speaks
+  orbHalo[0].material.opacity = (0.14 + 0.26 * orbGlow) * orbPresence;
+  orbHalo[1].material.opacity = (0.05 + 0.15 * orbGlow) * orbPresence;
+  orbHalo.forEach(h => h.scale.setScalar((0.35 + 0.65 * orbPresence) * (1 + 0.18 * orbGlow)));
+  orbLight.intensity = (0.12 + 0.30 * orbGlow) * orbPresence;
+  shadowDirty = true;
+  // Hand the orb to the flies at 20 Hz. A per-frame post would be 6 workers x 60 Hz for a
+  // position the 50 Hz eye cannot resolve any faster than this.
+  if (now - orbSynced < 50) return;
+  orbSynced = now;
+  env.janus = { x, y, z, glow: orbGlow };
+  for (const fl of flies) if (fl.ready) fl.worker.postMessage({ type: 'env', env: { janus: env.janus } });
+}
+
+// ---------------- persistent per-fly brains ----------------
+// Saved: identity + the learned mushroom-body overlay (114 kB per fly). NOT saved: membrane
+// potentials, the shared connectome, or the physics world -- none of those is what makes one
+// fly different from another, and all three are rebuilt on load in under a second.
+const MB_SIG = () => store.mbSignature(mushroom);
+let saveToken = 0, saveTimer = null;
+
+/** Ask a fly's worker for its current mushroom-body weights. Resolves null if it has none. */
+function requestMB(f, timeoutMs = 4000) {
+  if (!f.ready) return Promise.resolve(null);
+  f.mbPending ||= new Map();
+  const token = ++saveToken;
+  return new Promise(res => {
+    const done = m => { clearTimeout(t); res(m); };
+    const t = setTimeout(() => { f.mbPending.delete(token); res(null); }, timeoutMs);
+    f.mbPending.set(token, done);
+    f.worker.postMessage({ type: 'exportmb', token });
+  });
+}
+
+/** Write one fly to the local store, keyed by its name. */
+async function saveFlyRecord(f, { force = false } = {}) {
+  if (!PERSIST) return false;
+  const m = await requestMB(f);
+  if (!m) { if (!force) return false; }
+  // Nothing learned yet and nothing forced: no point rewriting 114 kB of zeros.
+  if (m && !m.dirty && !force) return false;
+  try {
+    await store.saveFly({
+      name: f.name, color: f.color, sex: f.sex, createdAt: f.createdAt,
+      simMs: m?.simMs || 0, energy: m?.energy, health: m?.health, lastPos: m?.pos || null,
+      mbSig: MB_SIG(), mb: m?.mb || null,
+    });
+    f.savedAt = Date.now();
+    return true;
+  } catch (e) { console.warn(`[flystore] save "${f.name}" failed`, e); return false; }
+}
+
+async function saveAllFlies(opts) {
+  if (!PERSIST) return;
+  for (const f of flies) await saveFlyRecord(f, opts);
+}
+
+/**
+ * Bring back the flies from last session. Returns true if it restored any, so the caller
+ * knows not to spawn the preset's default flies on top of them.
+ */
+async function restoreFlies() {
+  if (!PERSIST) return false;
+  let saved;
+  try { saved = await store.listFlies(); } catch (e) { console.warn('[flystore] unavailable', e); return false; }
+  if (!saved.length) return false;
+  const sig = MB_SIG();
+  let n = 0, stale = 0;
+  for (const meta of saved.slice(0, FLY_CAP)) {
+    const rec = await store.loadFly(meta.name, sig);
+    if (!rec) continue;
+    if (rec.stale) stale++;
+    // Put it back roughly where it was, nudged inside the wall.
+    const R = env.arena.radius - 0.45;
+    let [x, y] = rec.lastPos || [0, 0];
+    const d = Math.hypot(x, y); if (!Number.isFinite(d) || d > R) { const a = n * 2.4; x = 1.2 * Math.cos(a); y = 1.2 * Math.sin(a); }
+    await addFly([x, y], Math.atan2(-y, -x), rec.sex || 'm', rec);
+    n++;
+  }
+  if (n) status(`restored ${n} fl${n === 1 ? 'y' : 'ies'} from local store${stale ? ` (${stale} with a stale brain, started naive)` : ''}`);
+  return n > 0;
+}
+
+function startAutosave() {
+  if (!PERSIST) return;
+  // Every 20 s, and again whenever the page is being closed or hidden. Only dirty brains are
+  // written, so an idle fly costs one postMessage and nothing else.
+  saveTimer = setInterval(() => saveAllFlies(), 20000);
+  addEventListener('pagehide', () => saveAllFlies({ force: true }));
+  addEventListener('visibilitychange', () => { if (document.hidden) saveAllFlies(); });
+}
+
 // ---------------- render loop ----------------
 let lastFrame = performance.now(), fpsN = 0, fpsT = 0, lastSim = 0, lastSimReal = performance.now();
 const q = new THREE.Quaternion(), previousQ = new THREE.Quaternion(), followDelta = new THREE.Vector3(), brainBase = new THREE.Color();
@@ -646,6 +941,7 @@ function updateShadows(now) {
 const shadowOffset = new THREE.Vector3(3, 2, 8);
 function animate() {
   requestAnimationFrame(animate);
+  updateOrb(performance.now());   // before the hidden check: see the orbTicker comment below
   if (document.hidden) return;
   const now = performance.now(); fpsT += now - lastFrame; lastFrame = now; if (++fpsN === 30) { $('#fps').textContent = (30000 / fpsT).toFixed(0); fpsN = 0; fpsT = 0; }
   for (const f of flies) {

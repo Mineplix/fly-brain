@@ -30,9 +30,10 @@ export class FlyAgent {
     this.sensorAdr = {}; for (let i = 0; i < M.nsensor; i++) this.sensorAdr[M.sensor(i).name] = M.sensor_adr[i];
     this.jointAdr = {}; for (let j = 0; j < M.njnt; j++) this.jointAdr[M.jnt(j).name] = M.jnt_qposadr[j];
     // geoms: albedo for vision; which bodies count as "self body" for bristle contact
-    this.geomKind = []; for (let g = 0; g < M.ngeom; g++) { const n = M.geom(g).name; this.geomKind.push(n === 'floor' ? 'floor' : n.startsWith('wall') ? 'wall' : n.startsWith('food') ? 'food' : n.startsWith('bitter') ? 'bitter' : n.startsWith('hazard') ? 'hazard' : n.startsWith('obst') ? 'obst' : n.startsWith('proxy') ? 'fly' : n.startsWith('threat') ? 'threat' : 'self'); }
+    this.geomKind = []; for (let g = 0; g < M.ngeom; g++) { const n = M.geom(g).name; this.geomKind.push(n === 'floor' ? 'floor' : n.startsWith('wall') ? 'wall' : n.startsWith('food') ? 'food' : n.startsWith('bitter') ? 'bitter' : n.startsWith('hazard') ? 'hazard' : n.startsWith('obst') ? 'obst' : n.startsWith('proxy') ? 'fly' : n.startsWith('threat') ? 'threat' : n.startsWith('janus') ? 'janus' : 'self'); }
     this.floorGeom = M.geom('floor').id;
     this.threatMocap = M.body_mocapid[M.body('threat').id];
+    this.janusMocap = M.body_mocapid[M.body('janus').id];
     // brain
     this.brain = brain || createBrain(data, size, brainOpts, sign);   // wasm brain can be injected (shared connectome memory)
     // hunger as hormones and octopamine (neuromod: { calib: neuromod.json, block }); needs brainOpts.neuromod, which
@@ -105,6 +106,16 @@ export class FlyAgent {
   albedo = (g, x, y) => {
     const k = this.geomKind[g], L = this.look;
     if (k === 'threat') return 0.03;
+    // Janus is emissive, not reflective: the sky is divided out so the orb stays the brightest
+    // thing in the ring even with the lights down. `glow` already carries the arrival/departure
+    // ramp, so the flies see it brighten in and dim out rather than appear instantaneously.
+    // The brightest surface in the circus arena is the pale floor square at 0.92, so the orb sits
+    // above that even at glow 0: a glowing object should be the brightest thing in the ring, and
+    // a measured sweep showed that below ~0.9 it is lost against the floor rather than seen. The
+    // signal the flies actually get is therefore its ARRIVAL and DEPARTURE -- `glow` carries the
+    // fade ramp, so a bright object grows in and dims out over a few hundred ms, which is what
+    // the lobula columnar cells respond to. It is not a graded brightness code.
+    if (k === 'janus') return (0.95 + 0.45 * (this.env.janus?.glow || 0)) / Math.max(0.05, this.env.light.sky);
     if (k === 'floor') return L.floorLo + (L.floorHi - L.floorLo) * (((Math.floor(x / 0.4) + Math.floor(y / 0.4)) & 1) ? 1 : 0);   // checker floor
     if (k === 'wall') { const a = Math.atan2(y, x); return L.wallLo + (L.wallHi - L.wallLo) * ((Math.floor(a / (Math.PI / 12)) & 1) ? 1 : 0); }  // striped wall
     if (k === 'food') return 0.9; if (k === 'bitter') return 0.5; if (k === 'hazard') return 0.6; if (k === 'obst') return 0.12; if (k === 'fly') return 0.08;
@@ -116,6 +127,8 @@ export class FlyAgent {
     const mj = this.mj, M = this.model, d = this.mjd;
     const th = this.env.threat, tm = this.threatMocap * 3;
     if (th) { d.mocap_pos[tm] = th.x; d.mocap_pos[tm + 1] = th.y; d.mocap_pos[tm + 2] = th.z; } else if (d.mocap_pos[tm + 2] > -10) d.mocap_pos[tm + 2] = -20;
+    const jn = this.env.janus, jm = this.janusMocap * 3;
+    if (jn) { d.mocap_pos[jm] = jn.x; d.mocap_pos[jm + 1] = jn.y; d.mocap_pos[jm + 2] = jn.z; } else if (d.mocap_pos[jm + 2] > -10) d.mocap_pos[jm + 2] = -20;
     const st = this.state();
     const rates = this.senses.update(st, this.env, 1); this._sugar = st.sugar;
     if (this.eye && (this.t % 10 === 0)) { this._eyeRates = new Map(); const er = this._eyeRates; this.eye.update({ set: (ix, hz) => { for (const i of ix) er.set(i, hz); } }, this.env, 10, this.albedo); }

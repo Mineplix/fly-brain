@@ -14,6 +14,10 @@ export const DEFAULT_ENV = {
   humidity: 0.45,                 // ambient relative humidity; moist food raises it locally, heat dries it
   wind: [0, 0],
   threat: null,   // { x, y, z } position of the looming object (set by the host), or null
+  // Janus, the ringmaster, made physical: a hovering glowing orb. { x, y, z, glow } or null.
+  // It is a real geom in every fly's world, so the eye rays hit it and its brightness reaches
+  // the optic lobe -- the flies genuinely see it. glow (0..1) rises while it is speaking.
+  janus: null,
 };
 
 // Environment presets ("different environments to play and survive in")
@@ -55,6 +59,9 @@ export function buildWorldXML(flyXML, env, { flyPos = [0, 0, 0.13], flyYaw = 0, 
   for (let k = 0; k < nProxies; k++) parts.push(`<body name="proxy${k}" mocap="true" pos="${50 + k} 50 -5"><geom name="proxy${k}_body" type="ellipsoid" size="0.14 0.05 0.05" pos="-0.03 0 0" rgba=".2 .15 .1 1" group="0" contype="2" conaffinity="2"/><geom name="proxy${k}_head" type="sphere" size="0.045" pos="0.08 0 0.01" rgba=".5 .1 .08 1" group="0" contype="2" conaffinity="2"/></body>`);
   // a looming threat (predator / swatter): kinematic dark sphere, parked far away until launched
   parts.push(`<body name="threat" mocap="true" pos="0 0 -20"><geom name="threat_geom" type="sphere" size="0.35" rgba=".05 .05 .06 1" contype="0" conaffinity="0" group="0"/></body>`);
+  // Janus: a kinematic, non-colliding glowing sphere. Parked far below until the host places it.
+  // group="0" puts it in the ray group the eyes cast against (FlyVisionFV.groups), so it is seen.
+  parts.push(`<body name="janus" mocap="true" pos="0 0 -20"><geom name="janus_geom" type="sphere" size="0.22" rgba=".95 .12 .12 1" contype="0" conaffinity="0" group="0"/></body>`);
   const q = [Math.cos(flyYaw / 2), 0, 0, Math.sin(flyYaw / 2)];
   let xml = flyXML.replace('<worldbody>', `<worldbody>\n${parts.join('\n')}`);
   xml = xml.replace('<body name="thorax" childclass="body">', `<body name="thorax" childclass="body" pos="${flyPos.join(' ')}" quat="${q.map(v => v.toFixed(6)).join(' ')}">`);

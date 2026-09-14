@@ -1377,6 +1377,7 @@ thermosensory at 0 in both (no hazard) — the two antennal channels stay indepe
 | `?ringmaster=0/1` | Janus off/on (default on with the circus theme) |
 | `?learn=0` | fixed-weight brain, no mushroom-body plasticity |
 | `?eta=X` | multiply the learning rate (dose-response) |
+| `?persist=0` | don't save or restore flies (use for any benchmark or controlled run) |
 | `?cond=1` | run the differential-conditioning probe |
 | `?train=N` | training seconds for that probe |
 
@@ -1403,3 +1404,126 @@ These cost real time and are not obvious from the code.
   fresh tab costs seconds; retrying navigation on the dead one costs 5 minutes per attempt.
 - **A control that can be silently overridden is not a control.** Verify it took effect from
   inside the run, not from the URL you typed.
+
+---
+
+## 19. Janus made physical — the red orb
+
+Janus used to be a disembodied banner. It is now a red glowing orb that appears in the ring,
+and the point of the exercise was that **the flies actually see it** rather than it being
+scenery drawn over the top.
+
+**How it is wired.** One definition reaches both renderers:
+
+- `world.js` gives every fly's MuJoCo world a non-colliding `janus` mocap sphere (r = 0.16 cm),
+  parked at z = −20 until placed, in `group="0"` — the ray group `FlyVisionFV.groups` casts
+  against.
+- `fly.js` classifies its geom as `'janus'` and gives it an *emissive* albedo: the sky is
+  divided out, so the orb stays the brightest surface in the ring even with the lights down.
+- `arena.js` mirrors the orb's position into every worker at 20 Hz. flyvis resamples at 50 Hz,
+  so that is faster than the eye can resolve.
+
+**Measured, not assumed.** A `probe` message on the fly worker reports the janus geom id, its
+mocap position, its albedo, and how many of the 1,442 eye rays currently land on it:
+
+```
+before:  gid 93, kind "janus", mocap [0, 0, -20],      albedo 0.950, hits 0
+after:   gid 93, kind "janus", mocap [0.90, 0, 0.22],  albedo 1.175, hits 46
+```
+
+Through the live pipeline, 23 of 24 one-second samples had the orb in the fly's eye rays, 9–43
+rays at a time.
+
+> ⚠️ **I got this wrong twice before the probe existed.** An eye-image diff appeared to show
+> 48 columns changing when the orb was placed — that was the fly's own head motion between
+> samples, not the orb. A later test pinned the orb 0.9 cm in front of the fly's *starting*
+> heading and then let the fly walk away from it, producing a "no effect" reading that was
+> equally wrong. Counting ray hits inside the worker is the only measurement here that does
+> not depend on where the fly happens to be looking.
+
+**Brightness is not a graded code.** A sweep showed that below about 0.9 the orb is lost
+against the pale floor squares (albedo 0.92). It now sits above that at all times, so what the
+flies get is its **arrival and departure** — `glow` carries the fade ramp, so a bright object
+grows in and dims out over a few hundred ms. That is a transient of the kind the lobula
+columnar cells respond to. It is not a brightness signal they can read a value from, and the
+code says so.
+
+**It is an event, not furniture.** Three gates keep it from becoming scenery:
+
+| gate | value | why |
+|---|---|---|
+| priority | ≥ 1 | adventures, behaviour reactions and commands summon it; idle musings do not |
+| `maxStay` | 11 s | a chatty stretch cannot hold it in the air indefinitely |
+| `cooldown` | 16 s | after it leaves, the ring stays empty for a while whatever Janus says |
+
+Ungated, with two flies it was present 29 s out of 34. Gated: one 13 s visit, then 30 s clear.
+
+> ⚠️ **The orb must not be driven by the render loop.** `animate()` early-returns on
+> `document.hidden`, but the fly workers keep simulating. Driven by rAF alone, a backgrounded
+> orb freezes in mid-air and every fly goes on seeing a bright stationary object indefinitely —
+> which would quietly contaminate exactly the long unattended runs this is for. It is driven by
+> a 100 ms interval *and* the render loop, integrating on measured elapsed time, so extra calls
+> only make it smoother.
+
+Also worth knowing: **`document.hidden` is not reliable in the embedded preview pane.** Inside
+a rAF callback it read `false` while a `setTimeout` in the same document read `true`, in the
+same second. Don't build correctness on it.
+
+**Two units mistakes worth remembering.** The arena is 2.5 cm across and THREE's lights are in
+candela: a `PointLight(colour, 2.2, 4.0)` washed the entire set red. And a `MeshStandardMaterial`
+with a high `emissive` plus `toneMapped: false` drives the bloom straight to white, so the orb
+rendered pink. It is now an unlit `MeshBasicMaterial` with an explicit red ramp, and the
+brightness is carried by two additive shells.
+
+---
+
+## 20. Persistent flies — one saved brain per animal
+
+Flies now survive closing the page. Reopening restores the animals you had, with what they
+learned, instead of a fresh naive cast.
+
+**What is actually saved.** The connectome is *shared* — one SharedArrayBuffer of 165,122
+neurons and 10.5M edges read by every worker, which is the whole reason several flies fit in a
+browser. Duplicating it per fly would cost ~40 MB each. What genuinely differs between two
+flies is the learned part: the mushroom-body plastic overlay, one depression value per KC→MBON
+edge. **29,169 floats, 114 kB.** That array *is* the animal's individuality, and it is what
+gets written.
+
+Membrane potentials, the physics world and the connectome are not saved. None of them is what
+makes one fly different from another, and all three rebuild in under a second.
+
+| operation | effect on the store |
+|---|---|
+| add a fly | prompts for a name, creates a record under it (or offers to bring back an existing one) |
+| rename | moves the record — the name *is* the key |
+| delete | deletes the record for good |
+| every 20 s, and on `pagehide` | writes any brain that has actually learned something |
+
+**Verified end to end**, and not by trusting the save path: a recognisable pattern (every 100th
+edge depressed to 0.5) was planted in the store, the page reloaded, and the weights pulled back
+out of the **running worker's** `MushroomBody` — 292 non-zero edges at exactly the planted
+indices. Rename/add/delete were each checked against the store listing afterwards.
+
+> One honest gap: I have not yet demonstrated *naturally learned* weights surviving a reload.
+> In 44 s of wall time only ~1 s of simulation elapsed, and the mushroom body has a 4 s warm-up
+> before it will learn at all. The mechanism is proven; the biology needs a long run.
+
+**IndexedDB, not files.** A web page cannot write to arbitrary paths on disk. The store is
+keyed by fly name, so it behaves like a folder of files named after the flies; the ⇩ button on
+each fly row and the "⇧ Load fly" button export and import real `<name>.naf-fly` files (a JSON
+header followed by the raw Float32 array) when you want them on disk.
+
+**Two guards that matter:**
+
+- *Signature check.* Weights are stored with `nEdges:nKC:nMBON`. If the connectome or the
+  minimum-synapse threshold changes, the saved array indexes a different edge list; loading it
+  would scramble every learned weight. The identity is kept, the brain is dropped, and it says
+  so.
+- *Single owner.* Two tabs of this app share one IndexedDB. Without a guard both restore the
+  same flies at startup and both write back on their own timers, so each tab's autosave
+  silently overwrites the other's animals. The first tab claims the store over a
+  `BroadcastChannel`; later tabs run normally with persistence off. **This was not theoretical
+  — stale tabs left open during testing resurrected a deleted fly.**
+
+> ⚠️ **Use `?persist=0` for any benchmark or controlled run.** A fly that remembers the last
+> experiment is not a naive subject, and a restored cast is not the preset's cast.
