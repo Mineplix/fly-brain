@@ -16,6 +16,10 @@ export const AL_NORM = 600;         // GABA_B presynaptic gain control: total ev
                                     // Neurobiol 18:83). The glomerular pattern is preserved; the total is bounded,
                                     // so one strong odour cannot recruit the whole lobe.
 export const FLY_ODOR = { strength: 0.9, sigma: 0.28 };   // another fly is a short-range cVA/fly-odour source
+// Courtship song as heard by Johnston's organ. Drosophila pulse song: ~35 ms inter-pulse
+// interval, pulses a few ms long, carrier ~250 Hz. Near-field particle velocity, so the
+// effective range is millimetres -- rangeCm 0.6 is ~6 mm, about two body lengths.
+export const SONG = { ipiMs: 35, pulseMs: 10, rangeCm: 0.6, refCm: 0.12, maxHz: 170 };
 
 export class Senses {
   constructor(bodymap, mj, model) {
@@ -35,6 +39,7 @@ export class Senses {
     this.legBristle = {};   // the other ~75%: femur/tibia bristles, touched when a leg meets an obstacle
     for (const s of bodymap.sensors) if (s.kind === 'contact') { const key = s.name.replace('tactile ', '').replace(' ', '_'); this.tarsal[key] = s.idx.filter((_, k) => k % 4 === 0); this.legBristle[key] = s.idx.filter((_, k) => k % 4 !== 0); this.touchPrev[key] = 0; this.touchBurst[key] = 0; }
     this.photo = null;
+    this.songPhase = 0;   // pulse-train phase for courtship song (see SONG)
   }
   /** called once the brain metadata is available: map taste types to neuron indices per location */
   bindTypes(typeOf, sideOf, nerveLegOf) {
@@ -115,6 +120,29 @@ export class Senses {
     for (const sd of ['left', 'right']) if (w > 2) this.set(this.S[`haltere ${sd}`] || [], Math.min(200, 10 * w));
     // antennal mechanosensation (JO): wind and self-motion air flow
     for (const sd of ['left', 'right']) { const air = Math.hypot(env.wind[0] - st.vel[0], env.wind[1] - st.vel[1]); if (air > 0.5) this.set(this.S[`JO wind/gravity ${sd}`] || [], Math.min(150, 20 * air)); }
+    // --- courtship song: the one channel by which these flies talk to each other ---
+    // A singing male vibrates one wing; that is near-field particle velocity, not pressure, and
+    // Johnston's organ in the antenna is what detects it. Two consequences the model needs:
+    // the range is short (particle velocity falls roughly as 1/r^2 in the near field, so song is
+    // a courtship signal over millimetres, not a broadcast), and it is directional, because the
+    // two antennae sit a little apart. Distance is therefore measured from each antenna
+    // separately rather than from the body centre, which gives the bilateral difference for free.
+    // The carrier (~250 Hz) is far above what a 1 ms step can represent, but the pulse train is
+    // not: pulses are ~10 ms at ~35 ms intervals, and that interval is the species-recognition
+    // cue, so it is modelled explicitly.
+    this.songPhase = (this.songPhase + dtMs) % SONG.ipiMs;
+    if (this.songPhase < SONG.pulseMs) {
+      for (const o of st.otherFlies) {
+        if (!o.singing) continue;
+        for (const sd of ['left', 'right']) {
+          const a = st.antenna[sd];
+          const d = Math.hypot(a[0] - o.x, a[1] - o.y, a[2] - (o.z ?? 0.13));
+          if (d > SONG.rangeCm) continue;
+          const r = Math.max(d, SONG.refCm);
+          this.set(this.S[`JO auditory ${sd}`] || [], Math.min(SONG.maxHz, SONG.maxHz * (SONG.refCm / r) ** 2));
+        }
+      }
+    }
     // temperature: hot floor patches heat the fly (thermosensory neurons of the arista)
     st.heat = heatAt(st.pos, env);
     for (const sd of ['left', 'right']) { const h = heatAt(st.antenna[sd], env); if (h > 0.05) this.set(this.S[`thermosensory ${sd}`] || [], 200 * h); }

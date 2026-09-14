@@ -464,7 +464,7 @@ function onWorker(f, m) {
 let foodDirty = false, lastOthers = 0;
 function broadcastOthers(force = false) {
   const now = performance.now(); if (!force && now - lastOthers < 1000 / 30) return; lastOthers = now;
-  const poses = flies.filter(o => o.last && o.last.alive !== false).map(o => ({ id:o.id, x:o.last.pos[0], y:o.last.pos[1], z:o.last.pos[2], yaw:o.last.yaw, sex:o.sex }));
+  const poses = flies.filter(o => o.last && o.last.alive !== false).map(o => ({ id:o.id, x:o.last.pos[0], y:o.last.pos[1], z:o.last.pos[2], yaw:o.last.yaw, sex:o.sex, singing:!!o.last.singing }));
   for (const f of flies) if (f.ready) f.worker.postMessage({ type:'others', others:poses.filter(o => o.id !== f.id) });
 }
 function syncEnv() { for (const f of flies) if (f.ready) f.worker.postMessage({ type: 'env', env }); }
