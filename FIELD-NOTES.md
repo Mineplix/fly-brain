@@ -14,6 +14,31 @@ Target machine for all measurements:
 
 ---
 
+## Where to start
+
+| if you want… | read |
+|---|---|
+| to get it running | §1 setup — the blocker is not what the README implies |
+| a benchmark that means anything | §2 (which GPU you are actually on) then §18 method notes |
+| how many flies your machine holds | §8 ramp, §9 `?vision=0` |
+| how the sim is wired | §5 worker model, four clocks, what is shared |
+| the learning work | §14 mechanism, §15 results and their limits |
+| every URL flag | §17 |
+
+**State of play.** Phases 1–4 done and measured. The arena is restyled, six flies run with a
+live per-fly brain panel, flies can be added, renamed and deleted, and a rule-based
+ringmaster stages scenarios. Every sensory channel in the bodymap is now driven, including
+two that were silent. Mushroom-body plasticity exists, is contingent on punishment, and
+produces an odour-specific shift that scales with dose — but **no behavioural consequence has
+been demonstrated**, and the effect sign is inverted relative to textbook aversive learning.
+§15.5 states that position precisely.
+
+⚠️ Several claims in this file were **wrong and later corrected in place** — the GPU
+comparison in §2 and the temperature channel in §16.2 most notably. Corrections are marked
+rather than deleted, because how they were wrong is the useful part.
+
+---
+
 ## 1. Setup — what actually blocks you
 
 ✅ **The packed data files ARE committed.** This contradicts the natural reading of the
@@ -1079,14 +1104,302 @@ the round-robin poll working through the flies, not a bug.
 
 ---
 
-## 12. Open questions for later phases
+## 12. Fly management: delete, rename, slot recycling
 
-- Does `powerPreference: 'high-performance'` in `lifgpu.js:158` change the picture on the
-  4050? If WebGPU on discrete silicon beats 0.043×, the whole Phase 3 calculus changes.
-- Is the `steps < 8` / 8 ms cap tunable without breaking the motor loop's freshness
-  assumption? The comment warns that an unbounded queue "leaves the motor reading
-  increasingly old brain state".
-- `MAX_FLIES = 12` is baked into the memory allocation. Raising the worker-pool cap above
-  12 means touching `allocBrainMemory`, not just the pool.
-- Where does per-fly cost actually go — brain, MuJoCo, or the 1442 raycasts? Needs a
-  profile before Phase 4's vision toggle can be predicted rather than guessed.
+The project shipped with **no way to remove a fly**. No `worker.terminate()` anywhere, no
+removal path, and `nextId` only ever incremented — so `MAX_FLIES` was a *lifetime* budget,
+not a concurrency limit. Spawn twelve, kill them all, and you still had to reload.
+
+`removeFly(id)` now:
+
+1. `worker.terminate()` — nothing else stops the sim loop inside it
+2. `ArenaBatches.remove(fly)` — new; calls `BatchedMesh.deleteInstance` and splices the
+   entry out of `group.sources`. Without it a removed fly keeps its instance slots forever
+   and the batch fills up after `capacity` spawns even though flies have been deleted
+3. disposes meshes and the ground ring, frees the stack colour buffer
+4. **force-pushes `others`** so the survivors stop sensing a ghost proxy
+5. returns the slot to a free list
+
+⚠️ **Slot reuse is only safe because both brain backends clear state on construction** —
+`LIFWasm.reset()` runs in its constructor, `LIFGpu` allocates fresh buffers, and `FlyVis`
+rewrites `v` from bias. A new fly in a recycled slot does not inherit the old one's
+membrane potentials.
+
+📌 The stack panel had to be **rekeyed by slot** rather than array position, or rows shuffle
+when a fly in the middle is deleted.
+
+`FLY_LIMIT = 6` is a hard ceiling independent of `MAX_FLIES` and `?flies=`.
+
+---
+
+## 13. Janus — the rule-based ringmaster
+
+`src/ringmaster.js`. Not a model: no network, no API key, ~250 lines of pattern matching
+over written text. On by default with the circus theme; `?ringmaster=0` disables.
+
+**What it can see:** only the pose message each worker posts at 30 Hz — `behavior`,
+`energy`, `health`, `pos`, `flying`, `alive`. It has no access to neurons.
+
+**Three timers.** `watch()` every 400 ms reacts to behaviour *transitions*, so a fly walking
+for a minute produces one line rather than 150. `idle()` every 6 s fills silence.
+`runAdventure()` restages the arena every 75 s.
+
+`say()` rate-limits to 4.2 s (900 ms for priority), refuses to repeat the previous line, and
+scales its hide timer to text length. Priority is why a death interrupts idle chatter.
+
+**Adventures are data** — `{name, line, apply(env), restore?, threat?}`. Each rewrites `env`,
+then calls `rebuildEnv()` **and** posts to every worker. Two separate paths: miss the second
+and the arena *looks* changed while the flies never learn of it.
+
+⚠️ **Never stages obstacles.** `clearance()` reads `env.obstacles` live, but the MuJoCo world
+is built at fly creation — so a new obstacle would be *sensed* by existing flies while not
+physically existing for them.
+
+⚠️ **It mutates `env` on a timer, so `?ringmaster=0` for any benchmark.**
+
+📌 **It deliberately never uses the `stimulate` hook.** The workers accept
+`{type:'stimulate', indices, rate}`, which could drive named circuits directly. Not using it
+is what keeps every behaviour it comments on a genuine result of the simulated brain.
+
+---
+
+## 14. Mushroom-body learning
+
+### 14.1 Why an overlay, and why it is cheap
+
+Learning must be private per animal, but the connectome is shared — that sharing is what
+makes a fly cost state rather than another 40 MB of graph. It does not need duplicating: in
+*Drosophila*, associative memory lives at the Kenyon-cell to MBON synapse, and here that is
+
+| | |
+|---|---:|
+| total edges | 10,511,038 |
+| KC to MBON edges | **44,042** (0.419%) |
+| surviving `minSyn` with non-zero weight | **29,169** |
+| per-fly overlay (float32) | **114 KB** |
+| vs duplicating the graph | 40 MB per fly |
+
+The full circuit is present: **4,064 Kenyon cells, 97 MBONs, 340 dopaminergic neurons
+(PAM/PPL/DAN), 2 APL**.
+
+### 14.2 Why a trace rule, not spike pairs
+
+The default backend batches. `LIFGpu.step()` returns the **previous batch's** fired list,
+capped at 65,536 — so a per-step spike list does not exist on the backend most people run.
+`trace` (tau 30 ms) *is* read back every batch on both backends, so the rule is
+eligibility-trace x dopamine, which is also the standard formulation for this circuit.
+
+### 14.3 Compartments from connectivity, not names
+
+A DAN teaches the synapses of the compartment it innervates, so "same compartment" is taken
+directly as "this DAN synapses onto this MBON". Covers **96 of 97 MBONs and 334 of 340
+DANs**, median 5 DAN edges per MBON.
+
+📌 Name parsing would have failed outright — the types are opaque (`MBON01`, `PPL202`) with
+no compartment in the string.
+
+### 14.4 Four faults found by measuring, not reading
+
+Every one produced plausible numbers:
+
+1. **Tonic dopamine.** These DANs fire constantly (~39 summed trace at rest). Learning from
+   the absolute level depressed everything any active KC touched — ~2,700 edges in one
+   simulated second. That is decay, not association.
+2. **One time constant.** `trace` decays in 30 ms so the summed drive swings ~70% step to
+   step. An earlier "30.3 +/- 12%" reading was sampled at 4 Hz *through the pose message* —
+   the sampling was smoothing the very noise the rule then had to survive.
+3. **Priming on one sample.** Seeding baselines at t=0, when the brain has barely spiked,
+   left a permanent 250%+ apparent burst; the fly learned its own startup transient.
+4. **Wrong detector.** The gate ran on the MBON-weighted, *normalised* sum while the clean
+   separation had been measured on the plain summed DAN trace. Normalising destroys it —
+   punishment then read as a 20% *fall*.
+
+Final shape: dopamine low-passed to ~300 ms against an 8 s tonic reference, both seeded from
+an average over a settled window (1.2–4.0 s), gated globally and weighted per compartment.
+
+### 14.5 ⚠️ The experiment that killed the animal
+
+A radius-2.4 hazard at `heat: 1.0` drains health in ~2 simulated seconds, and
+`FlyAgent.step()` early-returns once `alive` is false — so the brain stops and dopamine
+decays. Two "punished" readings came from a **corpse** before anyone noticed.
+
+`heat: 0.5` is exactly the damage threshold (`if (st.heat > 0.5)`): full nociceptive drive,
+no harm. **Always log `health` alongside any punishment result.**
+
+### 14.6 Measured: punishment does reach the dopaminergic system
+
+| condition | summed DAN trace (min / median / max) |
+|---|---|
+| no heat | 27.07 / **30.28** / 34.57 |
+| heat | 42.71 / **50.94** / 56.66 |
+
++68% median, distributions **not overlapping**.
+
+---
+
+## 15. Differential conditioning — what it did and did not show
+
+`public/conditioning.js`, loaded by `?cond=1`. CS+ **vinegar**, CS− **geosmin** — chosen
+because they share **no glomeruli**. (Banana would have been a poor control: it overlaps
+vinegar on 4 of its 7.) Learning frozen during all four probes so they read the memory
+rather than writing to it.
+
+### 15.1 The readout had to be split
+
+A summed MBON population cannot test the hypothesis: MBONs have opposing valences and
+summing discards the balance the question is about. Two splits, both derived from data:
+
+- **`mbonSign`** — transmitter: 50 cholinergic (excitatory) vs 47 glutamatergic/GABAergic
+- **`mbonClass`** — 57 PPL1-innervated (aversive) vs 38 PAM-innervated (appetitive)
+
+### 15.2 Dose-response, 4 replicates per condition
+
+| readout | control (0x) | 1x dose | 9x dose | trend | t(9x vs ctrl) |
+|---|---:|---:|---:|---|---:|
+| all | +4.0±7.1 | +3.2±4.9 | +5.8±3.8 | — | 0.44 |
+| excitatory | +7.6±11.9 | +13.2±5.8 | +17.5±4.5 | rising | 1.55 |
+| inhibitory | +1.8±5.0 | −2.8±5.6 | −0.6±3.7 | — | −0.78 |
+| aversive cmpt | +7.5±8.8 | +9.0±7.5 | +12.4±5.2 | rising | 0.97 |
+| **appetitive cmpt** | +0.6±7.0 | −2.5±3.6 | −0.6±3.4 | — | −0.29 |
+| **exc/inh ratio** | +5.5±7.6 | +16.7±6.1 | +18.1±3.1 | **rising** | **3.09** |
+| **aver/appet ratio** | +6.8±2.2 | +12.8±4.7 | +13.6±2.3 | **rising** | **4.25** |
+
+Four readouts rise monotonically with dose, spread *shrinks* as dose rises, and the
+appetitive compartments — which punishment dopamine should not touch — show no trend in any
+condition.
+
+### 15.3 What the control taught
+
+⚠️ **A single pair of runs was misleading.** With n=1 the aversive-compartment effect looked
+like **+13.6** attributable to plasticity. With repeats it is **+1.5, t=0.25** — the control
+produces nearly as much as the learning run. A plasticity-free brain still separates CS+
+from CS− by 5–11 points, because the two odours are not equivalent stimuli and pre/post
+ordering is not neutral.
+
+📌 The control also needed a fix before it was one: the protocol calls `setLearn(true)`
+before training, which overrode `?learn=0`. A control that silently isn't one is worse than
+no control. Confirmed working by `depressed per fly: 0, 0, 0, 0`.
+
+### 15.4 ⚠️ Pseudo-replication
+
+The four "replicates" are four flies **in one arena**. They sense each other as proxies and
+share an olfactory field, so their noise is correlated. This inflates confidence; the t
+values above are optimistic. Genuinely independent seeds need separate runs at ~4x the cost.
+
+### 15.5 Honest position
+
+**Supported:** a plasticity-dependent, odour-specific shift in the MBON valence balance that
+scales with learning dose.
+
+**Not supported:** that it corresponds to avoidance behaviour.
+
+The sign is *inverted* relative to textbook aversive learning — the punished odour drives the
+aversive compartments **more**, not less. Consistent with disinhibition: Kenyon cells are
+cholinergic, so depressing KC drive onto an *inhibitory* MBON releases whatever it was
+suppressing. Inhibitory MBONs fell while excitatory ones rose, which is that signature.
+
+📌 Dose landed on **depth, not extent**: 9x the drive gave only ~6% more depressed synapses
+(4503 vs 4249) but roughly doubled mean depression (0.11 vs 0.05). The count saturates
+because only KCs active during training can be depressed, and they are nearly all hit.
+
+---
+
+## 16. Sensory channels — two were silent
+
+The bodymap maps every channel onto real connectome neurons. Two were never driven by any
+code path.
+
+### 16.1 Courtship song to Johnston's organ ✅ wired
+
+**114 auditory neurons (62 left, 52 right)** sat at exactly zero while males *did* sing
+(`intrinsic.courtSing`, behaviour label `singing (courtship)`). The flies sang and nothing
+heard.
+
+Song is **near-field particle velocity**, not pressure, with two consequences modelled
+rather than fudged:
+
+- falls off ~1/r^2, so it is a courtship signal over **millimetres** (`rangeCm` 0.6, about
+  two body lengths) rather than a broadcast
+- **directional**, because the antennae sit apart — so distance is measured from *each
+  antenna separately* and the bilateral difference falls out of the geometry
+
+The ~250 Hz carrier is far above a 1 ms step, but the **pulse train** is not, and the
+inter-pulse interval is the species-recognition cue: 10 ms pulses at 35 ms intervals.
+
+| condition | JO auditory L | R |
+|---|---:|---:|
+| male, nobody singing to him | 0 | 0 |
+| female, male silent (5 samples) | 0 | 0 |
+| **female, male singing** | **0.030** | **0.089** |
+
+Asymmetric with him on her right. The male's `JO wind/gravity` reads 0.26 in the same probe,
+so the silence was specific to the auditory channel, not a broken measurement.
+
+📌 Song range (0.6 cm) comfortably exceeds the distance at which singing starts
+(`Intrinsic.courtSing` = 0.45 cm), so a female is always within earshot of a singing male.
+Those two numbers were set independently and happen to be consistent.
+
+### 16.2 Humidity ✅ wired — temperature was already done
+
+⚠️ Correcting an earlier guess: **temperature was never broken.** `thermosensory` L/R (25
+neurons) is driven by `heatAt` at each antenna. Only `hygrosensory` L/R (**65 neurons**) was
+dead.
+
+Every food patch already carries a `water` fraction, so moist food is the vapour source:
+
+| position | humidity |
+|---|---:|
+| on the moist food patch | 0.550 |
+| 1 cm away | 0.489 |
+| far corner | 0.450 (ambient) |
+| on the patch, hot floor | **0.200** (dried below ambient) |
+| on the patch, 14 cm/s wind | **0.472** (excess mixed away) |
+
+The bodymap pools moist and dry cells into one group per side, so only the moist response is
+modelled — and it is driven by the rise **above ambient**, not the absolute level. A gradient
+is what a fly can navigate; a constant ambient would pin all 65 neurons at a fixed rate
+forever.
+
+Verified: hygrosensory 0 / 0 away from water, **0.508 / 0.520** on moist food, with
+thermosensory at 0 in both (no hazard) — the two antennal channels stay independent.
+
+---
+
+## 17. The full flag surface
+
+| flag | effect |
+|---|---|
+| `?env=<preset>` | `foraging`, `openfield`, `predator`, `maze`, `social`, `courtship` |
+| `?flies=N` | worker-pool cap, clamped to `FLY_LIMIT` = 6 |
+| `?gpu=0` | force the WASM brain kernel |
+| `?vision=0` | blind flies — skips raycasting and flyvis |
+| `?theme=lab` | original muted arena instead of the circus |
+| `?ringmaster=0/1` | Janus off/on (default on with the circus theme) |
+| `?learn=0` | fixed-weight brain, no mushroom-body plasticity |
+| `?eta=X` | multiply the learning rate (dose-response) |
+| `?cond=1` | run the differential-conditioning probe |
+| `?train=N` | training seconds for that probe |
+
+---
+
+## 18. Method notes worth keeping
+
+These cost real time and are not obvious from the code.
+
+- **Check which physical device a benchmark runs on.** The adapter string is one line of
+  JavaScript. `chrome://gpu` does *not* answer it — it lists every adapter present.
+- **Background tabs throttle the workers.** Chrome throttles `setTimeout`, and the sim
+  dropped from 0.102 to 0.018 sim-s/s when the tab lost focus. Any timed protocol needs the
+  window in front.
+- **`animate()` early-returns on `document.hidden`**, so rendering stops in a hidden pane and
+  `#fps` reads 0. Sim-only numbers are right for headless goals and optimistic for playback.
+- **Log the animal's health alongside any punishment result.** A dead fly stops stepping and
+  every downstream signal decays.
+- **A dynamic `import()` of a file in `public/` is not in Vite's module graph** — the
+  transform fails and the whole inline script 500s with no visible error. Inject a tag.
+- **Compare at matched *simulated* time, not wall time.** A startup transient made one
+  circuit read 86 Hz where its settled value was 4 Hz.
+- **A preview tab that stops responding is usually a dead CDP connection, not memory.** A
+  fresh tab costs seconds; retrying navigation on the dead one costs 5 minutes per attempt.
+- **A control that can be silently overridden is not a control.** Verify it took effect from
+  inside the run, not from the URL you typed.
