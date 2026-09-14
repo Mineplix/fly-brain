@@ -189,6 +189,10 @@ function buildScene(data) {
 let stackRenderer, stackScene, stackCam, stackPts, stackIdx = null;
 const stackCols = [];                 // per fly: THREE.BufferAttribute of colours
 const STACK_STRIDE = 2, STACK_ROW = 84;
+// Resting neurons are near-black, not dim green: ~82k points in an 84 px row overlap heavily,
+// and with normal (non-additive) blending a green resting colour fills the whole silhouette,
+// leaving spikes with nowhere to stand out. REST keeps just enough tint to read the outline.
+const REST = [0.010, 0.026, 0.018], SPAN = [0.36, 0.97, 0.43];
 let stackRows = -1, stackSpin = 0;
 function buildStack(data) {
   const keep = [];
@@ -215,16 +219,17 @@ function buildStack(data) {
 function stackAddFly(i) {
   if (!stackIdx || stackCols[i]) return;
   const a = new Float32Array(stackIdx.length * 3);
-  for (let k = 0; k < stackIdx.length; k++) { a[k * 3] = 0.03; a[k * 3 + 1] = 0.09; a[k * 3 + 2] = 0.06; }
+  for (let k = 0; k < stackIdx.length; k++) { a[k * 3] = REST[0]; a[k * 3 + 1] = REST[1]; a[k * 3 + 2] = REST[2]; }
   stackCols[i] = new THREE.BufferAttribute(a, 3).setUsage(THREE.DynamicDrawUsage);
 }
-/** write one fly's spike trace into its colour buffer: dark teal at rest -> bright green when firing */
+/** write one fly's spike trace into its colour buffer: near-black at rest -> bright green when firing */
 function stackTrace(i, trace) {
   const attr = stackCols[i]; if (!attr || !stackIdx) return;
   const a = attr.array, idx = stackIdx;
   for (let k = 0; k < idx.length; k++) {
-    const v = Math.min(1, trace[idx[k]] * 1.6);
-    a[k * 3] = 0.03 + v * 0.34; a[k * 3 + 1] = 0.09 + v * 0.88; a[k * 3 + 2] = 0.06 + v * 0.38;
+    const t = Math.min(1, trace[idx[k]] * 1.6);
+    const v = t * t * (3 - 2 * t);   // smoothstep: crushes the decaying tail, keeps fresh spikes bright
+    a[k * 3] = REST[0] + v * SPAN[0]; a[k * 3 + 1] = REST[1] + v * SPAN[1]; a[k * 3 + 2] = REST[2] + v * SPAN[2];
   }
   attr.needsUpdate = true;
 }
