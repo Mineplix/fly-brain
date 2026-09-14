@@ -9,12 +9,13 @@ import { Neuromod } from './neuromod.js';
 import { Flight } from './flight.js';
 import { FlyVisionFV } from './vision.js';
 import { Motor } from './motor.js';
+import { MushroomBody } from './mushroom.js';
 import { createBrain } from '../brainmodel.js';
 
 const Rt9 = (xm, b) => [xm[b * 9], xm[b * 9 + 3], xm[b * 9 + 6]];   // body x axis (heading) in world frame
 
 export class FlyAgent {
-  constructor({ mj, flyXML, env, data, size, sign, bodymap, gait, id = 0, pos = [0, 0], yaw = 0, nProxies = 0, mode = 'descending', brainOpts = {}, vision = true, brain = null, flyvis = null, intrinsic = true, seed = 0, neuromod = null, sex = 'm', look = null }) {
+  constructor({ mj, flyXML, env, data, size, sign, bodymap, gait, id = 0, pos = [0, 0], yaw = 0, nProxies = 0, mode = 'descending', brainOpts = {}, vision = true, brain = null, flyvis = null, intrinsic = true, seed = 0, neuromod = null, sex = 'm', look = null, mushroom = null }) {
     this.id = id; this.mj = mj; this.env = env; this.data = data; this.vision = vision; this.sex = sex;
     // Reflectance of the checker floor and striped wall, matching whatever the host is drawing.
     // Defaults are the original muted arena; the circus theme is far higher contrast.
@@ -50,6 +51,9 @@ export class FlyAgent {
     this.motor = new Motor(mj, M, this.mjd, bodymap, typeOf, sideOf, gait, mode);
     this.intrinsic = intrinsic ? new Intrinsic(typeOf, sideOf, id + 1 + (seed || 0), bodymap.feeding) : null;
     this.flight = new Flight({ mj, model: M, data: this.mjd, thorax: this.bid.thorax, jointAdr: this.jointAdr, act: this.motor.act, range: this.motor.range, rand: this.intrinsic?.rand });
+    // Per-fly associative memory over the KC->MBON slice. Private to this animal; the shared
+    // connectome is never written. Stage 1: allocated and stepped, but learns nothing yet.
+    this.mb = mushroom ? new MushroomBody(mushroom, this.brain) : null;
     this.flights = 0;
     this.driven = new Int32Array(0);
     // physiology
@@ -179,6 +183,7 @@ export class FlyAgent {
     }
     const dtSub = 1000 * M.opt.timestep;
     for (let s = 0; s < this.physPerMs; s++) { if (this.flight.active) this.flight.substep(dtSub); mj.mj_step(M, d); }
+    this.mb?.step(1);            // associative memory: reads traces, injects learned depression
     this.t += 1;
     this.physiology(st);
   }

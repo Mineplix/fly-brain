@@ -13,6 +13,8 @@ import { PRESETS } from './sim/world.js';
 import { allocBrainMemory, MAX_FLIES } from './brainsetup.js';
 import { parseFlyVis } from './flyvis.js';
 import { buildGroups } from './sim/groups.js';
+import { startRingmaster } from './ringmaster.js';
+import { buildMushroomIndex } from './sim/mushroom.js';
 const BASE = import.meta.env.BASE_URL; // "/" in dev, "/fly-brain/" on GitHub Pages
 
 const $ = s => document.querySelector(s);
@@ -29,7 +31,8 @@ const PRESET = PRESETS[presetKey] || PRESETS.foraging;
 // load time (see allocBrainMemory) and cannot grow afterwards. Note that slots are never
 // reclaimed (nothing calls worker.terminate), so this is a lifetime budget rather than a
 // concurrency limit -- lowering it needs a page reload.
-const FLY_CAP = Math.min(MAX_FLIES, Math.max(1, Number(new URLSearchParams(location.search).get('flies')) || 6));
+const FLY_LIMIT = 6;   // hard ceiling for this build, regardless of MAX_FLIES or ?flies=
+const FLY_CAP = Math.min(FLY_LIMIT, MAX_FLIES, Math.max(1, Number(new URLSearchParams(location.search).get('flies')) || 6));
 // ?vision=0 runs the flies blind: no eye raycasting (2 x 721 rays per fly per 20 ms) and no
 // flyvis optic-lobe model. The ~62k optic-lobe neurons stay in the connectome and keep their
 // chemical synapses -- they are simply never driven by light, so the fly navigates by smell,
@@ -52,6 +55,12 @@ const LOOK = {
             tent: false, stair: null,
             albedo: { floorLo: 0.35, floorHi: 0.60, wallLo: 0.15, wallHi: 0.75 } },
 }[THEME];
+// Ringmaster: narrates the flies and restages the arena between "adventures". On by default
+// with the circus theme, off for 'lab'. ?ringmaster=0 / =1 forces it either way.
+// ⚠️ It mutates env on a timer, so DISABLE IT FOR BENCHMARKS (?ringmaster=0) -- a run that
+// changes the food, wind and light halfway through is not measuring one thing.
+const RM_FLAG = new URLSearchParams(location.search).get('ringmaster');
+const RINGMASTER = RM_FLAG === '1' || (RM_FLAG !== '0' && THEME === 'circus');
 const env = PRESET.env();
 // The staircase is a real obstacle, not scenery. Pushing its treads into env.obstacles means
 // world.js builds collision geoms, clearance() senses them, and the eye rays hit them -- all
@@ -69,6 +78,7 @@ function spiralStaircase({ x, y, color, pole }) {
   return out;
 }
 const flies = [];          // {id, worker, group, bodies[], last, color, ready}
+let mushroom = null;
 let flyvisMap, shared, meta, bodymap, flyXML, gait, visual, batches, outputPass, running = false, selected = 0, tool = 'none', speed = 2, brainMem, wasmModule, brainParams, neuromodCalib;
 
 function toShared(ta) { const sab = new SharedArrayBuffer(ta.byteLength); const out = new ta.constructor(sab); out.set(ta); return out; }
@@ -99,6 +109,10 @@ async function main() {
   status('writing connectome and optic-lobe model into shared memory');
   brainMem = allocBrainMemory({ ...data, superclass: data.superclass }, shared.size, shared.sign, brainParams, MAX_FLIES, vision);
   flyvisMap = fvm;
+  // Plastic KC->MBON slice (0.4% of the graph). Built once here because it needs the effective
+  // post-writeGraph weights; shared read-only with every worker, which keeps its own depression map.
+  mushroom = buildMushroomIndex(data, brainMem.memory, brainMem.graph);
+  console.info(`mushroom body: ${mushroom.nKC} KCs -> ${mushroom.nEdges} plastic KC->MBON edges`);
   window.__data = data;
   buildBrainPanel(data);
   buildScene(data);
@@ -109,8 +123,9 @@ async function main() {
   else { await addFly([st0[0], st0[1]], st0[2]);
     for (let k = 1; k < Math.min(PRESET.flies || 1, FLY_CAP); k++) { const ang = k * 2.4; await addFly([1.2 * Math.cos(ang), 1.2 * Math.sin(ang)], ang + Math.PI); } }
   if (PRESET.autoThreat) setInterval(() => { if (!running || !flies.length) return; const live = flies.filter(f => f.last?.alive !== false); if (!live.length) return; selected = live[Math.floor(Math.random() * live.length)].id; launchThreat(); }, PRESET.autoThreat * 1000);
-  window.__arena = { camera, controls, flies, env, THREE, renderer, scene, gtao, composer, metrics, resolution, batches, visual, addFly, rebuildEnv, FLY_CAP, MAX_FLIES };
+  window.__arena = { camera, controls, flies, env, THREE, renderer, scene, gtao, composer, metrics, resolution, batches, visual, addFly, rebuildEnv, launchThreat, FLY_CAP, MAX_FLIES };
   animate();
+  if (RINGMASTER) window.__ringmaster = startRingmaster(window.__arena);
 }
 
 // ---------------- scene ----------------
@@ -236,16 +251,19 @@ function stackTrace(i, trace) {
   }
   attr.needsUpdate = true;
 }
+/** free a deleted fly's colour buffer so the slot starts clean when reused */
+function stackRemoveFly(slot) { stackCols[slot] = null; stackRows = -1; }
+
 let stackLabelKey = '';
-function stackLabels() {
-  const key = flies.length + ':' + selected;   // renderFlyList also ticks every 500 ms; don't wipe the live Hz readouts
-  if (key === stackLabelKey) return;
+function stackLabels(force = false) {
+  const key = flies.map(f => f.id + f.name).join(',') + ':' + selected;   // renderFlyList also ticks every 500 ms; don't wipe the live Hz readouts
+  if (!force && key === stackLabelKey) return;
   stackLabelKey = key;
   const host = $('#stLabels'); host.innerHTML = '';
   flies.forEach((f, i) => {
     const d = document.createElement('div'); d.className = 'r' + (f.id === selected ? ' sel' : '');
     d.style.top = (i * STACK_ROW) + 'px';
-    d.innerHTML = `<b>#${f.id}</b><i style="background:${f.color}"></i><span class="hz"></span>`;
+    d.innerHTML = `<b>${f.name}</b><i style="background:${f.color}"></i><span class="hz"></span>`;
     host.appendChild(d);
   });
   $('#stCount').textContent = flies.length + (flies.length === 1 ? ' fly' : ' flies');
@@ -261,7 +279,7 @@ function drawStack() {
   stackSpin += 0.005; stackPts.rotation.y = stackSpin;
   stackRenderer.setViewport(0, 0, w, h); stackRenderer.setScissor(0, 0, w, h); stackRenderer.clear();   // setViewport takes CSS px; three applies the pixel ratio
   for (let i = 0; i < n; i++) {
-    const col = stackCols[i]; if (!col) continue;
+    const col = stackCols[flies[i].slot]; if (!col) continue;   // keyed by slot: array position shifts on delete
     stackPts.geometry.setAttribute('color', col);
     const y = h - (i + 1) * STACK_ROW;          // three's viewport origin is bottom-left; rows read top-down
     stackRenderer.setViewport(0, y, w, STACK_ROW); stackRenderer.setScissor(0, y, w, STACK_ROW);
@@ -365,21 +383,59 @@ function updateWingBlur(f, s) {
 }
 
 // ---------------- flies ----------------
-let nextId = 0;
+// Slot pool. A slot is an index into brainMem.bases (and the flyvis eye blocks), allocated at
+// load time for MAX_FLIES. Slots used to be handed out by an ever-incrementing counter, so a
+// deleted fly's slot was lost forever; they are now recycled. Reuse is safe because both brain
+// backends clear their state on construction -- LIFWasm.reset() in its constructor, and LIFGpu
+// allocates fresh buffers -- and FlyVis rewrites v from bias.
+let nextSlot = 0;
+const freeSlots = [];
+const takeSlot = () => (freeSlots.length ? freeSlots.shift() : nextSlot++);
+
 async function addFly(pos, yaw, sex = 'm') {
-  if (nextId >= FLY_CAP) { alert(`Worker-pool cap reached: ${FLY_CAP} flies (?flies=N to raise, max ${MAX_FLIES})`); return; }
-  const id = nextId++; const color = FLY_COLORS[id % FLY_COLORS.length];
+  if (flies.length >= FLY_CAP) { alert(`Fly limit reached: ${FLY_CAP}. Delete one first.`); return; }
+  const id = takeSlot(), color = FLY_COLORS[id % FLY_COLORS.length];
   const worker = new Worker(new URL('./sim/fly.worker.js', import.meta.url), { type: 'module' });
-  const f = { id, worker, color, sex, ready: false, last: null, prev: null, stats: {}, ...buildFlyMesh(color, sex) };
-  scene.add(f.group); flies.push(f); batches.add(f); stackAddFly(flies.length - 1);
+  const f = { id, slot: id, name: `Fly ${id}`, worker, color, sex, ready: false, last: null, prev: null, stats: {}, ...buildFlyMesh(color, sex) };
+  scene.add(f.group); flies.push(f); batches.add(f); stackAddFly(id);
   worker.onmessage = e => onWorker(f, e.data);
   worker.postMessage({ type: 'init', id, graph: shared, meta, bodymap, flyXML, gait, env, pos, yaw, nProxies: MAX_FLIES - 1, mode: $('#mode').value, brainOpts: brainParams, neuromod: neuromodCalib, vision: !NO_VISION, sex, look: LOOK.albedo,
-    brainMem: { memory: brainMem.memory, graph: brainMem.graph, bases: brainMem.bases, opts: brainMem.opts, fv: brainMem.fv }, wasmModule, slot: id, flyvisMap });
+    brainMem: { memory: brainMem.memory, graph: brainMem.graph, bases: brainMem.bases, opts: brainMem.opts, fv: brainMem.fv }, wasmModule, slot: id, flyvisMap, mushroom });
   await new Promise(res => { f.onReady = res; });
   if (running) worker.postMessage({ type: 'run' });
   worker.postMessage({ type: 'speed', speed });
   renderFlyList();
   return f;
+}
+
+/** Remove a fly for good: kill its worker, free its GPU/CPU resources and recycle its slot. */
+function removeFly(id) {
+  const i = flies.findIndex(f => f.id === id);
+  if (i < 0) return false;
+  const f = flies[i];
+  f.worker.terminate();                       // nothing else stops the sim loop inside it
+  batches.remove(f);
+  scene.remove(f.group); scene.remove(f.ring);
+  f.ring.geometry.dispose(); f.ring.material.dispose();
+  f.group.traverse(o => { if (o.isMesh) { o.geometry?.dispose(); if (o.material !== f.ring.material) o.material?.dispose?.(); } });
+  flies.splice(i, 1);
+  freeSlots.push(f.slot);
+  stackRemoveFly(f.slot);
+  if (selected === id) selected = flies[0]?.id ?? -1;
+  shadowDirty = true; batches.dirty = true;
+  broadcastOthers(true);                      // stop the survivors sensing a ghost proxy
+  renderFlyList(); stackLabels(true);
+  window.__ringmaster?.say(`${f.name} has left the circus. Do not ask where.`, { priority: 2 });
+  return true;
+}
+
+function renameFly(id, name) {
+  const f = flies.find(x => x.id === id);
+  if (!f) return false;
+  f.name = String(name).trim().slice(0, 24) || `Fly ${id}`;
+  renderFlyList(); stackLabels(true);
+  if (id === selected) $('#bpTitle').innerHTML = `Inside ${f.name} <i style="display:inline-block;width:8px;height:8px;border-radius:50%;background:${f.color}"></i>`;
+  return true;
 }
 function onWorker(f, m) {
   if (m.type === 'ready') { f.ready = true; f.bodyNames = m.bodyNames; f.bodyGroups = m.bodyNames.map(n => f.bodies[n] || null); buildWingBlur(f, m.wingPoses); f.onReady?.(); }
@@ -390,7 +446,8 @@ function onWorker(f, m) {
     if (f.id === selected && (f.prev?.takeoffPending !== m.takeoffPending || f.prev?.flying !== m.flying)) renderFlyList();
     broadcastOthers();
   } else if (m.type === 'activity') {
-    const k = flies.indexOf(f); if (k >= 0) stackTrace(k, m.trace);           // every fly feeds its own stack row
+    stackTrace(f.slot, m.trace);           // every fly feeds its own stack row
+    const k = flies.indexOf(f);
     const row = $('#stLabels')?.children[k]?.querySelector('.hz');
     if (row) row.textContent = (m.groups.reduce((s, x) => s + x, 0) / m.groups.length).toFixed(1) + ' Hz';
     if (f.id === selected && (f.activityTime !== m.t || histFly !== f.id)) {   // the selected fly also drives the big inset
@@ -399,8 +456,8 @@ function onWorker(f, m) {
   }
 }
 let foodDirty = false, lastOthers = 0;
-function broadcastOthers() {
-  const now = performance.now(); if (now - lastOthers < 1000 / 30) return; lastOthers = now;
+function broadcastOthers(force = false) {
+  const now = performance.now(); if (!force && now - lastOthers < 1000 / 30) return; lastOthers = now;
   const poses = flies.filter(o => o.last && o.last.alive !== false).map(o => ({ id:o.id, x:o.last.pos[0], y:o.last.pos[1], z:o.last.pos[2], yaw:o.last.yaw, sex:o.sex }));
   for (const f of flies) if (f.ready) f.worker.postMessage({ type:'others', others:poses.filter(o => o.id !== f.id) });
 }
@@ -432,6 +489,12 @@ function buildUI() {
   }, 120);
   $('#wind').oninput = e => { const v = +e.target.value; $('#windv').textContent = v; env.wind = [v, 0]; syncEnv(); };
   $('#light').oninput = e => { env.light.sky = +e.target.value; scene.background = new THREE.Color().setHSL(0.6, 0.3, 0.02 + 0.05 * env.light.sky); syncEnv(); };
+  const sendCmd = () => { const v = $('#jcmd').value; if (!v.trim()) return;
+    if (!window.__ringmaster) { alert('Janus is not running (?ringmaster=1 to enable).'); return; }
+    window.__ringmaster.command(v); $('#jcmd').value = ''; };
+  $('#jgo').onclick = sendCmd;
+  $('#jcmd').onkeydown = e => { if (e.key === 'Enter') { e.preventDefault(); sendCmd(); } };
+  $('#janussec').hidden = !RINGMASTER;
   $('#threat').onclick = () => launchThreat();
   $('#takeoff').onclick = () => flies.find(x => x.id === selected)?.worker.postMessage({ type: 'takeoff' });
   setInterval(() => { if (foodDirty) { foodDirty = false; syncEnv(); envGroup.children.forEach(m => { if (m.userData.food) m.material.opacity = 0.35 + 0.65 * Math.min(1, m.userData.food.amount / 5); }); } renderFlyList(); }, 500);
@@ -455,9 +518,19 @@ function renderFlyList() {
   $('#nfly').textContent = flies.length;
   $('#flies').innerHTML = flies.map(f => { const s = f.last || {}; const e = s.energy ?? 0, h = s.health ?? 1;
     return `<div class="fly ${f.id === selected ? 'sel' : ''}" data-id="${f.id}"><i class="dot" style="background:${f.color}"></i>
-      <div>${f.sex === 'f' ? '♀' : '♂'} fly ${f.id} <span style="color:var(--acc)">${s.behavior || ''}</span><div class="bar"><i style="width:${e * 100}%;background:#f2c14e"></i></div><div class="bar"><i style="width:${h * 100}%;background:#4ade80"></i></div></div>
+      <div>${f.sex === 'f' ? '♀' : '♂'} ${f.name} <span style="color:var(--acc)">${s.behavior || ''}</span><div class="bar"><i style="width:${e * 100}%;background:#f2c14e"></i></div><div class="bar"><i style="width:${h * 100}%;background:#4ade80"></i></div></div>
+      <span class="flyact"><button class="mini ren" title="Rename">✎</button><button class="mini del" title="Remove this fly">✕</button></span>
       <span style="color:var(--dim)">${s.t ? (s.t / 1000).toFixed(1) + 's' : '…'}</span></div>`; }).join('');
-  $('#flies').querySelectorAll('.fly').forEach(el => el.onclick = () => { selected = +el.dataset.id; renderFlyList(); });
+  $('#flies').querySelectorAll('.fly').forEach(el => {
+    const id = +el.dataset.id;
+    el.onclick = () => { selected = id; renderFlyList(); };
+    el.querySelector('.ren').onclick = ev => { ev.stopPropagation();
+      const f = flies.find(x => x.id === id); if (!f) return;
+      const n = prompt('Name this fly:', f.name); if (n !== null) renameFly(id, n); };
+    el.querySelector('.del').onclick = ev => { ev.stopPropagation();
+      const f = flies.find(x => x.id === id); if (!f) return;
+      if (confirm(`Remove ${f.name}? Its worker is terminated and the slot is freed for a new fly.`)) removeFly(id); };
+  });
   const f = flies.find(x => x.id === selected); $('#selsec').hidden = !f;
   $('#takeoff').textContent = f?.last?.takeoffPending ? (running ? 'Takeoff queued' : 'Takeoff queued · press Run') : 'Activate takeoff DNs';
   $('#takeoff').disabled = !f?.ready || f.last?.flying || f.last?.alive === false;
@@ -527,8 +600,13 @@ function onActivity(f, m) {
 
 // ---------------- looming threat: a dark sphere swoops toward the selected fly's head from the front-side ----------------
 let threatMesh = null, threatAnim = null;
-function launchThreat() {
-  const f = flies.find(x => x.id === selected); if (!f?.last) return;
+// targetId defaults to the selected fly (the UI button); callers may name one instead.
+// Falls back to any living fly, so a programmatic caller isn't silently a no-op when the
+// selected fly is dead or hasn't reported a pose yet.
+function launchThreat(targetId = selected) {
+  const live = x => x.last && x.last.alive !== false;
+  const f = flies.find(x => x.id === targetId && live(x)) || flies.find(live);
+  if (!f) return;
   const p = f.last.pos, yaw = f.last.yaw, a = yaw + 0.6;
   const start = [p[0] + 3.0 * Math.cos(a), p[1] + 3.0 * Math.sin(a), 1.6], end = [p[0] + 0.25 * Math.cos(a), p[1] + 0.25 * Math.sin(a), 0.45];
   if (!threatMesh) { threatMesh = new THREE.Mesh(new THREE.SphereGeometry(0.35, 32, 16), new THREE.MeshStandardMaterial({ color: '#0d0d10', roughness: 0.6 })); threatMesh.castShadow = true; scene.add(threatMesh); }

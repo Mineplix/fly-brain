@@ -60,3 +60,30 @@ a { color: var(--acc); }
 #stLabels .r i { width: 7px; height: 7px; border-radius: 50%; flex: none; }
 #stLabels .r.sel b { color: #fff; }
 #stLabels .r .hz { margin-left: auto; font-size: 9px; color: #6fbf90; text-shadow: 0 1px 2px rgba(0,0,0,.9); }
+
+/* ringmaster banner: circus announcement over the arena, DOM only (no GPU cost) */
+#ringmaster {
+  position: fixed; left: 50%; top: 18px; transform: translate(-50%, -14px);
+  z-index: 60; max-width: min(720px, 56vw); padding: 10px 18px 11px;
+  background: linear-gradient(#2a0d14, #1a060c); border: 2px solid #f6c624; border-radius: 12px;
+  box-shadow: 0 10px 34px rgba(0,0,0,.55), inset 0 0 0 2px #e02128;
+  opacity: 0; pointer-events: none; transition: opacity .35s ease, transform .35s ease;
+  text-align: center;
+}
+#ringmaster.on { opacity: 1; transform: translate(-50%, 0); }
+#ringmaster b {
+  display: block; font-size: 10px; letter-spacing: .18em; text-transform: uppercase;
+  color: #f6c624; margin-bottom: 3px;
+}
+#ringmaster span { display: block; font-size: 15px; line-height: 1.35; color: #fff6e6; }
+
+/* per-fly rename / delete, and the Janus command box */
+.fly .flyact { display: inline-flex; gap: 3px; margin-left: 4px; }
+.mini { border: 1px solid var(--line); background: rgba(255,255,255,.05); color: var(--dim);
+  border-radius: 5px; padding: 0 5px; line-height: 17px; font-size: 11px; cursor: pointer; }
+.mini:hover { color: var(--fg); background: rgba(255,255,255,.12); }
+.mini.del:hover { color: #fff; background: #b3261e; border-color: #b3261e; }
+#jcmd { flex: 1; min-width: 0; background: rgba(255,255,255,.06); border: 1px solid var(--line);
+  color: var(--fg); border-radius: 6px; padding: 5px 8px; font: inherit; }
+#jcmd:focus { outline: none; border-color: #f6c624; }
+#jhint { font-size: 10px; line-height: 1.5; }
