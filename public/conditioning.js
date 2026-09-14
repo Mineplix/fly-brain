@@ -34,7 +34,10 @@ const fly = () => A.flies[0];
 const simT = () => fly().last?.t ?? 0;
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 const sync = () => { for (const f of A.flies) if (f.ready) f.worker.postMessage({ type: 'env', env: A.env }); };
-const setLearn = on => fly().worker.postMessage({ type: 'learn', on });
+// ?learn=0 must survive the protocol. The training phase explicitly enables plasticity, which
+// would otherwise re-enable it in the control and make the control identical to the test.
+const LEARN_OK = new URLSearchParams(location.search).get('learn') !== '0';
+const setLearn = on => fly().worker.postMessage({ type: 'learn', on: on && LEARN_OK });
 
 /** Uniform odour across the whole arena, so the reading does not depend on where the fly wanders. */
 function present(odor, heat) {
@@ -71,6 +74,7 @@ try {
   const play = document.querySelector('#play');
   if (play && !play.textContent.includes('Pause')) play.click();
 
+  say(LEARN_OK ? 'RUN: plasticity ON' : 'CONTROL: plasticity OFF throughout (?learn=0)');
   say('CS+ vinegar (punished)   CS- geosmin (safe)');
   say('learning frozen during all four probes');
   say('');
@@ -118,12 +122,12 @@ try {
   const specific = Math.abs(diff) > 5;           // CS+ and CS- moved differently at all
   const aversive = diff < -5;                    // and in the direction aversive learning predicts
   colour = aversive ? '#4ade80' : (specific ? '#60a5fa' : '#fbbf24');
-  head = aversive ? 'ODOUR-SPECIFIC, aversive direction'
+  const tag = LEARN_OK ? '' : ' [CONTROL, no plasticity]';
+  head = (aversive ? 'ODOUR-SPECIFIC, aversive direction'
        : specific ? 'ODOUR-SPECIFIC, but opposite sign'
-                  : 'NO SELECTIVITY';
+                  : 'NO SELECTIVITY') + tag;
   say(aversive ? 'CS+ shifted away from the aversive compartments, CS- did not.'
-    : specific ? 'CS+ and CS- moved differently, so the change is odour specific -- but the
-punished odour drove the aversive compartments MORE, not less.'
+    : specific ? 'CS+ and CS- moved differently, so the change is odour specific -- but the punished odour drove the aversive compartments MORE, not less.'
                : 'CS+ and CS- moved together: general depression, not an association.');
   window.__cond = { preA, preB, postA, postB, rows, dep, specific, aversive, diff };
   paint();
