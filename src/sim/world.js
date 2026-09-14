@@ -18,6 +18,10 @@ export const DEFAULT_ENV = {
   // It is a real geom in every fly's world, so the eye rays hit it and its brightness reaches
   // the optic lobe -- the flies genuinely see it. glow (0..1) rises while it is speaking.
   janus: null,
+  // A monster that hunts the flies. { x, y, z } or null. Like Janus it is a real geom in every
+  // fly's world, so the eye rays hit it; unlike Janus it is near-black, so it reads as a dark
+  // mass growing in the visual field -- which is what the looming/escape pathway responds to.
+  monster: null,
 };
 
 // Environment presets ("different environments to play and survive in")
@@ -62,6 +66,9 @@ export function buildWorldXML(flyXML, env, { flyPos = [0, 0, 0.13], flyYaw = 0, 
   // Janus: a kinematic, non-colliding glowing sphere. Parked far below until the host places it.
   // group="0" puts it in the ray group the eyes cast against (FlyVisionFV.groups), so it is seen.
   parts.push(`<body name="janus" mocap="true" pos="0 0 -20"><geom name="janus_geom" type="sphere" size="0.22" rgba=".95 .12 .12 1" contype="0" conaffinity="0" group="0"/></body>`);
+  // The monster: a kinematic dark mass, non-colliding so it cannot wedge the solver, parked
+  // below the world until Janus sets one loose.
+  parts.push(`<body name="monster" mocap="true" pos="0 0 -20"><geom name="monster_geom" type="ellipsoid" size="0.34 0.26 0.24" rgba=".06 .05 .07 1" contype="0" conaffinity="0" group="0"/></body>`);
   const q = [Math.cos(flyYaw / 2), 0, 0, Math.sin(flyYaw / 2)];
   let xml = flyXML.replace('<worldbody>', `<worldbody>\n${parts.join('\n')}`);
   xml = xml.replace('<body name="thorax" childclass="body">', `<body name="thorax" childclass="body" pos="${flyPos.join(' ')}" quat="${q.map(v => v.toFixed(6)).join(' ')}">`);

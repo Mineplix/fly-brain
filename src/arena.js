@@ -45,6 +45,14 @@ const LEARN = new URLSearchParams(location.search).get('learn') !== '0';
 // ?eta=X scales the mushroom-body learning rate, for dose-response tests. If an effect is real
 // it should grow with the dose; if it does not, it was not the learning producing it.
 const ETA_MUL = Math.max(0, Number(new URLSearchParams(location.search).get('eta')) || 1);
+// Phasic-dopamine gate threshold (MB_DEFAULTS.phasicFloor). Learning happens only while the
+// smoothed DAN trace sits this far above its own slow baseline, which is what stops the rule
+// depressing everything from the tonic level. The default was calibrated against a hot floor
+// said to drive popRel to 0.27-0.34; measured in this build it rests at 0.002 and peaks at
+// 0.111 under punishment, so 0.15 is unreachable. ?dafloor=X overrides it -- and any value
+// used must be checked against an unpunished control, or it is not measuring learning.
+const DA_FLOOR_RAW = Number(new URLSearchParams(location.search).get('dafloor'));
+const DA_FLOOR = Number.isFinite(DA_FLOOR_RAW) && DA_FLOOR_RAW >= 0 ? DA_FLOOR_RAW : null;
 // Persistent flies. Each fly's learned mushroom-body weights are kept locally (IndexedDB,
 // keyed by the fly's name) and restored next time the page opens, so the flies you had are
 // the flies you get back rather than a fresh set of naive ones.
@@ -56,7 +64,7 @@ let PERSIST = new URLSearchParams(location.search).get('persist') !== '0' && LEA
 // This is NOT purely cosmetic: the floor and wall albedos in FlyAgent.albedo() are kept in
 // step with these, so a higher-contrast arena drives the photoreceptors harder.
 const THEME = new URLSearchParams(location.search).get('theme') === 'lab' ? 'lab' : 'circus';
-const LOOK = {
+const LOOKS = {
   circus: { floorA: '#12121a', floorB: '#f0ede4', wallA: '#e02128', wallB: '#f6c624',
             prop: ['#21c8e4', '#ff4fa3', '#9ae62c', '#ff8a2b', '#a45cff', '#2bd9b0'],
             bunting: ['#21c8e4', '#ff4fa3', '#f6c624', '#9ae62c'], food: '#ffd84d', sky: '#1a0f1e',
@@ -68,7 +76,26 @@ const LOOK = {
             prop: ['#3d4a3d'], bunting: null, food: '#f2c14e', sky: '#0b0e14',
             tent: false, stair: null, orb: '#ff2318', orbGlow: '#ff6a4a',
             albedo: { floorLo: 0.35, floorHi: 0.60, wallLo: 0.15, wallHi: 0.75 } },
-}[THEME];
+  // Janus can restage the ring into any of these. Not decoration: `albedo` is handed to every
+  // fly, so a dungeon really is darker to the flies than the big top, and switching sets the
+  // optic lobe re-settling against the new scene rather than reading it as a sudden transient.
+  dungeon: { floorA: '#2b2722', floorB: '#4a443b', wallA: '#1e1c22', wallB: '#38343c',
+             prop: ['#5b5348', '#6b6257', '#43403a', '#514a40'],
+             bunting: null, food: '#c9a227', sky: '#07070a',
+             tent: false, stair: null,
+             albedo: { floorLo: 0.10, floorHi: 0.26, wallLo: 0.06, wallHi: 0.16 } },
+  cavern:  { floorA: '#1d2b2a', floorB: '#30443f', wallA: '#14201f', wallB: '#24332f',
+             prop: ['#3d5a52', '#2f4a44', '#4a6b5e'],
+             bunting: null, food: '#7fe3c0', sky: '#04090b',
+             tent: false, stair: null,
+             albedo: { floorLo: 0.07, floorHi: 0.22, wallLo: 0.04, wallHi: 0.13 } },
+  lab2:    { floorA: '#d8dce3', floorB: '#eef1f6', wallA: '#aeb6c2', wallB: '#ccd3dc',
+             prop: ['#7f8c9b', '#9aa7b6'],
+             bunting: null, food: '#ffd84d', sky: '#dfe5ee',
+             tent: false, stair: null,
+             albedo: { floorLo: 0.72, floorHi: 0.91, wallLo: 0.45, wallHi: 0.68 } },
+};
+let LOOK = LOOKS[THEME] || LOOKS.circus;
 // Ringmaster: narrates the flies and restages the arena between "adventures". On by default
 // with the circus theme, off for 'lab'. ?ringmaster=0 / =1 forces it either way.
 // ⚠️ It mutates env on a timer, so DISABLE IT FOR BENCHMARKS (?ringmaster=0) -- a run that
@@ -150,7 +177,7 @@ async function main() {
   startAutosave();
   startOrbTicker();
   if (PRESET.autoThreat) setInterval(() => { if (!running || !flies.length) return; const live = flies.filter(f => f.last?.alive !== false); if (!live.length) return; selected = live[Math.floor(Math.random() * live.length)].id; launchThreat(); }, PRESET.autoThreat * 1000);
-  window.__arena = { camera, controls, flies, env, THREE, renderer, scene, gtao, composer, metrics, resolution, batches, visual, addFly, removeFly, renameFly, rebuildEnv, launchThreat, janusSpeak, store, saveAllFlies, saveFlyRecord, PERSIST, FLY_CAP, MAX_FLIES,
+  window.__arena = { camera, controls, flies, env, THREE, renderer, scene, gtao, composer, metrics, resolution, batches, visual, addFly, removeFly, renameFly, rebuildEnv, launchThreat, janusSpeak, setLook, LOOKS, theme: THEME, releaseMonster, recallMonster, store, saveAllFlies, saveFlyRecord, PERSIST, FLY_CAP, MAX_FLIES,
     orbDebug: () => ({ presence: orbPresence, glow: orbGlow, until: orbUntil, now: performance.now(), out: orbWasOut, spokeAt: orbSpokeAt }) };
   animate();
   if (RINGMASTER) window.__ringmaster = startRingmaster(window.__arena);
@@ -434,10 +461,10 @@ async function addFly(pos, yaw, sex = 'm', saved = null) {
   const worker = new Worker(new URL('./sim/fly.worker.js', import.meta.url), { type: 'module' });
   const f = { id, slot: id, name, worker, color, sex, ready: false, last: null, prev: null, stats: {},
     createdAt: saved?.createdAt || Date.now(), restored: !!saved?.mb, stale: !!saved?.stale, ...buildFlyMesh(color, sex) };
-  scene.add(f.group); flies.push(f); batches.add(f); stackAddFly(id);
+  scene.add(f.group); flies.push(f); batches.add(f); stackAddFly(id); eyeAddFly(f);
   worker.onmessage = e => onWorker(f, e.data);
   worker.postMessage({ type: 'init', id, graph: shared, meta, bodymap, flyXML, gait, env, pos, yaw, nProxies: MAX_FLIES - 1, mode: $('#mode').value, brainOpts: brainParams, neuromod: neuromodCalib, vision: !NO_VISION, sex, look: LOOK.albedo,
-    brainMem: { memory: brainMem.memory, graph: brainMem.graph, bases: brainMem.bases, opts: brainMem.opts, fv: brainMem.fv }, wasmModule, slot: id, flyvisMap, mushroom, learn: LEARN, etaMul: ETA_MUL,
+    brainMem: { memory: brainMem.memory, graph: brainMem.graph, bases: brainMem.bases, opts: brainMem.opts, fv: brainMem.fv }, wasmModule, slot: id, flyvisMap, mushroom, learn: LEARN, etaMul: ETA_MUL, mbParams: DA_FLOOR === null ? null : { phasicFloor: DA_FLOOR },
     mbState: saved?.mb || null, restore: saved ? { energy: saved.energy, health: saved.health } : null },
     saved?.mb ? [saved.mb] : []);
   await new Promise(res => { f.onReady = res; });
@@ -468,11 +495,11 @@ function removeFly(id) {
   f.group.traverse(o => { if (o.isMesh) { o.geometry?.dispose(); if (o.material !== f.ring.material) o.material?.dispose?.(); } });
   flies.splice(i, 1);
   freeSlots.push(f.slot);
-  stackRemoveFly(f.slot);
+  stackRemoveFly(f.slot); eyeRemoveFly(f.id);
   if (selected === id) selected = flies[0]?.id ?? -1;
   shadowDirty = true; batches.dirty = true;
   broadcastOthers(true);                      // stop the survivors sensing a ghost proxy
-  renderFlyList(); stackLabels(true);
+  renderFlyList(); stackLabels(true); eyeLabels();
   if (PERSIST) store.deleteFly(f.name).catch(e => console.warn('[flystore] delete failed', e));
   window.__ringmaster?.say(`${f.name} has left the circus. Do not ask where.`, { priority: 2 });
   return true;
@@ -487,7 +514,7 @@ function renameFly(id, name) {
   if (PERSIST && f.name !== was) store.renameStored(was, f.name)
     .then(ok => { if (!ok) saveFlyRecord(f, { force: true }); })
     .catch(e => console.warn('[flystore] rename failed', e));
-  renderFlyList(); stackLabels(true);
+  renderFlyList(); stackLabels(true); eyeLabels();
   if (id === selected) $('#bpTitle').innerHTML = `Inside ${f.name} <i style="display:inline-block;width:8px;height:8px;border-radius:50%;background:${f.color}"></i>`;
   return true;
 }
@@ -505,6 +532,7 @@ function onWorker(f, m) {
     const k = flies.indexOf(f);
     const row = $('#stLabels')?.children[k]?.querySelector('.hz');
     if (row) row.textContent = (m.groups.reduce((s, x) => s + x, 0) / m.groups.length).toFixed(1) + ' Hz';
+    drawEyes(f, m.eyes);                   // every fly draws its own eye row
     if (f.id === selected && (f.activityTime !== m.t || histFly !== f.id)) {   // the selected fly also drives the big inset
       f.activityTime = m.t; brainAct.set(m.trace); brainDirty = true; onActivity(f, m);
     }
@@ -659,13 +687,62 @@ function buildBrainPanel(data) {
     el.querySelector('.q').onclick = () => { const i = el.querySelector('.info'); i.hidden = !i.hidden; };
   });
   // eye columns: azimuth/elevation of each column's viewing direction; the front of each eye faces the middle
-  const W = 168, H = 116;
+  const W = EYE_W, H = EYE_H;
   eyeDots = ['L', 'R'].map(sd => flyvisMap.eyes[sd].dirs.map(([x, y, z]) => {
     const az = Math.atan2(y, x) * 180 / Math.PI, el = Math.asin(Math.max(-1, Math.min(1, z))) * 180 / Math.PI;
     return [(sd === 'L' ? 165 - az : 10 - az) / 175 * (W - 8) + 4, (69 - el) / 129 * (H - 8) + 4];
   }));
   $('#brainpanel').hidden = false;
 }
+// ---- per-fly eye rows -------------------------------------------------------------------
+// The activity poll is already round-robin over every fly, so each fly's 721-column luminance
+// pair arrives periodically -- it was simply being discarded for all but the selected fly,
+// which made the eyes the only panel here that showed one animal while the stack beside it
+// showed all of them. Drawing every fly's costs nothing extra in message traffic.
+const EYE_W = 150, EYE_H = 104;
+function eyeRows() { return $('#eyerows'); }
+function eyeAddFly(f) {
+  const host = eyeRows(); if (!host || host.querySelector(`[data-id="${f.id}"]`)) return;
+  const row = document.createElement('div');
+  row.className = 'eyerow'; row.dataset.id = f.id;
+  row.innerHTML = `<span class="who"><i style="background:${f.color}"></i><b></b></span>
+    <canvas width="${EYE_W}" height="${EYE_H}"></canvas><canvas width="${EYE_W}" height="${EYE_H}"></canvas>`;
+  row.onclick = () => { selected = f.id; renderFlyList(); eyeLabels(); };
+  host.appendChild(row);
+  eyeLabels();
+}
+function eyeRemoveFly(id) { eyeRows()?.querySelector(`[data-id="${id}"]`)?.remove(); eyeLabels(); }
+function eyeLabels() {
+  const host = eyeRows(); if (!host) return;
+  for (const row of host.children) {
+    const f = flies.find(x => x.id === +row.dataset.id); if (!f) continue;
+    row.querySelector('b').textContent = f.name;
+    row.querySelector('i').style.background = f.color;
+    row.classList.toggle('sel', f.id === selected);
+  }
+  const n = host.children.length;
+  const c = $('#eyeCount'); if (c) c.textContent = n ? `${n} fl${n === 1 ? 'y' : 'ies'}` : '';
+}
+/** Paint one fly's two 721-column luminance maps. `eyes` is null when ?vision=0. */
+function drawEyes(f, eyes) {
+  const row = eyeRows()?.querySelector(`[data-id="${f.id}"]`); if (!row || !eyeDots) return;
+  const cv = row.querySelectorAll('canvas');
+  for (let sd = 0; sd < 2; sd++) {
+    const cx = cv[sd].getContext('2d');
+    cx.fillStyle = '#05070c'; cx.fillRect(0, 0, EYE_W, EYE_H);
+    if (!eyes) {
+      cx.fillStyle = '#5b6472'; cx.font = '10px system-ui, sans-serif'; cx.textAlign = 'center';
+      cx.fillText('vision off', EYE_W / 2, EYE_H / 2); continue;
+    }
+    const lum = eyes[sd], dots = eyeDots[sd];
+    for (let c = 0; c < dots.length; c++) {
+      const v = Math.round(255 * Math.min(1, lum[c]));
+      cx.fillStyle = `rgb(${v},${v},${v})`;
+      cx.beginPath(); cx.arc(dots[c][0], dots[c][1], 2.6, 0, 6.2832); cx.fill();
+    }
+  }
+}
+
 function onActivity(f, m) {
   if (histFly !== f.id) { histFly = f.id; hist = groups.map(() => [[], []]); $('#bpTitle').innerHTML = `Inside fly ${f.id} <i style="display:inline-block;width:8px;height:8px;border-radius:50%;background:${f.color}"></i>`; }
   const rows = $('#groups').children;
@@ -679,17 +756,7 @@ function onActivity(f, m) {
     const fmt = (x) => x >= 100 ? x.toFixed(0) : x.toFixed(1);
     const v = row.querySelector('.v'); v.children[0].textContent = g.L.length ? fmt(m.groups[j * 2]) + ' Hz' : '–'; v.children[1].textContent = g.R.length ? fmt(m.groups[j * 2 + 1]) + ' Hz' : '–';
   });
-  if (m.eyes) ['#eyeL', '#eyeR'].forEach((id, s) => {
-    const cx = $(id).getContext('2d'), lum = m.eyes[s], dots = eyeDots[s];
-    cx.fillStyle = '#05070c'; cx.fillRect(0, 0, 168, 116);
-    for (let c = 0; c < dots.length; c++) { const v = Math.round(255 * Math.min(1, lum[c])); cx.fillStyle = `rgb(${v},${v},${v})`; cx.beginPath(); cx.arc(dots[c][0], dots[c][1], 3, 0, 6.2832); cx.fill(); }
-  });
-  else ['#eyeL', '#eyeR'].forEach(id => {   // ?vision=0: no eyes sampled, say so rather than leave a stale frame
-    const cx = $(id).getContext('2d');
-    cx.fillStyle = '#05070c'; cx.fillRect(0, 0, 168, 116);
-    cx.fillStyle = '#5b6472'; cx.font = '11px system-ui, sans-serif'; cx.textAlign = 'center';
-    cx.fillText('vision off', 84, 62);
-  });
+
 }
 
 // ---------------- looming threat: a dark sphere swoops toward the selected fly's head from the front-side ----------------
@@ -921,6 +988,97 @@ function startAutosave() {
   addEventListener('visibilitychange', () => { if (document.hidden) saveAllFlies(); });
 }
 
+// ---------------- Janus restaging the ring: look changes the flies' world, not just ours ----------------
+/**
+ * Swap the arena's surfaces. rebuildEnv() already regenerates the floor texture, wall, bunting,
+ * tent and props from LOOK, so changing LOOK and rebuilding restages everything. The part that
+ * matters biologically is the last line: albedo() in every worker is handed the new reflectances,
+ * so a dungeon is genuinely darker to the flies' photoreceptors than the big top was.
+ */
+function setLook(name) {
+  const next = LOOKS[name]; if (!next || next === LOOK) return false;
+  LOOK = next;
+  if (scene) scene.background = new THREE.Color(LOOK.sky);
+  rebuildEnv();
+  for (const f of flies) if (f.ready) f.worker.postMessage({ type: 'look', look: LOOK.albedo });
+  shadowDirty = true;
+  return true;
+}
+
+// ---------------- the monster: something that hunts ----------------
+// A dark mass that pursues the nearest living fly. It is a real geom in every fly's world, so
+// the eye rays hit it and it grows in the visual field as it closes -- and while it is hunting
+// it also drives env.threat, which is the existing looming channel into DNp01 and the escape
+// reflex. So the flies flee it through the same pathway a real looming predator would use,
+// rather than through anything bolted on for the occasion.
+const MON = { speed: 0.55, turn: 2.2, z: 0.30, giveUpCm: 0.22, threatCm: 1.1, hunt: 26000 };
+let monsterMesh = null, monsterState = null, monsterLast = 0;
+
+function buildMonster() {
+  const g = new THREE.Group();
+  const body = new THREE.Mesh(new THREE.SphereGeometry(0.3, 24, 18),
+    new THREE.MeshStandardMaterial({ color: '#0a0910', roughness: 0.85, metalness: 0.0 }));
+  body.scale.set(1.12, 0.86, 0.8); body.castShadow = true; g.add(body);
+  for (const sx of [-1, 1]) {                                  // two dim eyes, so it reads as alive
+    const e = new THREE.Mesh(new THREE.SphereGeometry(0.055, 12, 10),
+      new THREE.MeshBasicMaterial({ color: '#ff3a1e', toneMapped: false }));
+    e.position.set(0.24, sx * 0.1, 0.08); g.add(e);
+  }
+  scene.add(g); return g;
+}
+
+/** Set a monster loose on the flies for `ms` of wall time. */
+function releaseMonster(ms = MON.hunt) {
+  const live = flies.filter(f => f.last && f.last.alive !== false);
+  if (!live.length) return false;
+  if (!monsterMesh) monsterMesh = buildMonster();
+  // enter from the wall, away from everyone
+  const a = Math.random() * Math.PI * 2, R = env.arena.radius - 0.15;
+  monsterState = { x: R * Math.cos(a), y: R * Math.sin(a), yaw: a + Math.PI, until: performance.now() + ms };
+  monsterLast = performance.now();
+  return true;
+}
+
+function recallMonster() {
+  if (!monsterState) return;
+  monsterState = null;
+  if (monsterMesh) monsterMesh.visible = false;
+  env.monster = null; if (!threatAnim) env.threat = null;
+  for (const f of flies) if (f.ready) f.worker.postMessage({ type: 'env', env: { monster: null, threat: env.threat } });
+}
+
+function updateMonster(now) {
+  if (!monsterState) return;
+  const dt = Math.min(0.1, (now - monsterLast) / 1000); monsterLast = now;
+  if (now > monsterState.until) { recallMonster(); window.__ringmaster?.say('The beast tires of you. This time.', { priority: 2 }); return; }
+  // chase the nearest living fly
+  const live = flies.filter(f => f.last && f.last.alive !== false);
+  if (!live.length) { recallMonster(); return; }
+  let target = live[0], best = Infinity;
+  for (const f of live) { const d = Math.hypot(f.last.pos[0] - monsterState.x, f.last.pos[1] - monsterState.y); if (d < best) { best = d; target = f; } }
+  const want = Math.atan2(target.last.pos[1] - monsterState.y, target.last.pos[0] - monsterState.x);
+  let dy = want - monsterState.yaw; while (dy > Math.PI) dy -= 2 * Math.PI; while (dy < -Math.PI) dy += 2 * Math.PI;
+  monsterState.yaw += Math.max(-MON.turn * dt, Math.min(MON.turn * dt, dy));
+  // ease off once it is right on top of a fly, so it stalks rather than jittering through it
+  const sp = MON.speed * (best < MON.giveUpCm ? 0.15 : 1);
+  monsterState.x += sp * dt * Math.cos(monsterState.yaw);
+  monsterState.y += sp * dt * Math.sin(monsterState.yaw);
+  const R = env.arena.radius - 0.1, d0 = Math.hypot(monsterState.x, monsterState.y);
+  if (d0 > R) { monsterState.x *= R / d0; monsterState.y *= R / d0; }
+  const bob = 0.04 * Math.sin(now / 260);
+  monsterMesh.visible = true;
+  monsterMesh.position.set(monsterState.x, monsterState.y, MON.z + bob);
+  monsterMesh.rotation.z = monsterState.yaw;
+  shadowDirty = true;
+  if (now - (monsterState.synced || 0) < 50) return;
+  monsterState.synced = now;
+  env.monster = { x: monsterState.x, y: monsterState.y, z: MON.z + bob };
+  // close enough to loom: feed the existing threat channel so escape fires through DNp01
+  const near = best < MON.threatCm;
+  if (!threatAnim) env.threat = near ? { ...env.monster } : null;
+  for (const f of flies) if (f.ready) f.worker.postMessage({ type: 'env', env: { monster: env.monster, threat: env.threat } });
+}
+
 // ---------------- render loop ----------------
 let lastFrame = performance.now(), fpsN = 0, fpsT = 0, lastSim = 0, lastSimReal = performance.now();
 const q = new THREE.Quaternion(), previousQ = new THREE.Quaternion(), followDelta = new THREE.Vector3(), brainBase = new THREE.Color();
@@ -970,7 +1128,7 @@ function animate() {
   const sf = flies.find(x => x.id === selected);
   if (sf?.last && $('#follow').checked) { const p = sf.last.pos; followDelta.set(p[0], p[1], p[2]).sub(controls.target).multiplyScalar(0.1); controls.target.add(followDelta); camera.position.add(followDelta); }
   if (sf?.last) { const t = sf.last.t / 1000; $('#simt').textContent = t.toFixed(2); if (now - lastSimReal > 1000) { $('#rt').textContent = ((t - lastSim) / ((now - lastSimReal) / 1000)).toFixed(2); lastSim = t; lastSimReal = now; } }
-  updateThreat(); controls.update();
+  updateThreat(); updateMonster(now); controls.update();
   camera.updateMatrixWorld();
   viewFrustum.setFromProjectionMatrix(viewProjection.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse));
   let largest = 0;

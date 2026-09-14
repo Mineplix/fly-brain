@@ -18,7 +18,7 @@ onmessage = async (e) => {
     const brain = await attachBrain(m.wasmModule, m.brainMem, m.slot, data, 101 + m.id);
     const flyvis = m.brainMem.fv ? { eyes: attachEyes(brain.instance, m.brainMem, m.slot), map: m.flyvisMap, gain: 150 } : null;
     fly = new FlyAgent({ brain, flyvis, mj, flyXML: m.flyXML, env, data, size: g.size, sign: g.sign, bodymap: m.bodymap, gait: m.gait, id: m.id,
-      pos: m.pos, yaw: m.yaw, nProxies: m.nProxies, mode: m.mode, brainOpts: m.brainOpts, vision: m.vision, neuromod: { calib: m.neuromod }, sex: m.sex, look: m.look, mushroom: m.mushroom, learn: m.learn, etaMul: m.etaMul });
+      pos: m.pos, yaw: m.yaw, nProxies: m.nProxies, mode: m.mode, brainOpts: m.brainOpts, vision: m.vision, neuromod: { calib: m.neuromod }, sex: m.sex, look: m.look, mushroom: m.mushroom, learn: m.learn, etaMul: m.etaMul, mbParams: m.mbParams });
     meter = new GroupMeter(buildGroups(m.bodymap, data.meta.types, data.side), g.N);
     proxyIds = Array.from({ length:m.nProxies }, (_,k) => fly.model.body_mocapid[fly.model.body(`proxy${k}`).id]);
     // A saved brain: the mushroom-body depression array from a previous session. Length is
@@ -39,6 +39,8 @@ onmessage = async (e) => {
   else if (m.type === 'env') { Object.assign(env, m.env); fly.env = env; if (fly.foodEaten.length !== env.food.length) fly.foodEaten = env.food.map(() => 0); }
   else if (m.type === 'others') { others = m.others; fly.others = others; setProxies(); }
   else if (m.type === 'mode') fly.motor.mode = m.mode;
+  // Janus restaging the arena changes what the surfaces reflect, so the flies' vision changes too.
+  else if (m.type === 'look') { fly.look = m.look; fly.fv && (fly.fv.settled = false); }
   else if (m.type === 'stimulate') fly.brain.setDrive(m.indices, m.rate);
   else if (m.type === 'learn') { if (fly.mb) fly.mb.learn = !!m.on; }
   else if (m.type === 'mbreset') { fly.mb?.reset(); if (fly.mb) fly.mb.stats.phasicPeak = 0; }
@@ -52,12 +54,13 @@ onmessage = async (e) => {
   }
   else if (m.type === 'probe') {
     const M = fly.model, d = fly.mjd; let gid = -1;
-    for (let g = 0; g < M.ngeom; g++) if (M.geom(g).name === 'janus_geom') gid = g;
-    const jm = fly.janusMocap;
+    const want = m.geom || 'janus_geom';
+    for (let g = 0; g < M.ngeom; g++) if (M.geom(g).name === want) gid = g;
+    const jm = want === 'monster_geom' ? fly.monsterMocap : fly.janusMocap;
     postMessage({ type: 'probe', gid, kind: gid >= 0 ? fly.geomKind[gid] : null, mocapId: jm,
       mocapPos: [d.mocap_pos[jm*3], d.mocap_pos[jm*3+1], d.mocap_pos[jm*3+2]],
       geomPos: gid >= 0 ? [d.geom_xpos[gid*3], d.geom_xpos[gid*3+1], d.geom_xpos[gid*3+2]] : null,
-      envJanus: fly.env.janus, albedo: gid >= 0 ? fly.albedo(gid, 0, 0) : null,
+      geom: want, envJanus: fly.env.janus, envMonster: fly.env.monster, albedo: gid >= 0 ? fly.albedo(gid, 0, 0) : null,
       nmocap: M.nmocap, hits: fly.fv ? (() => { const gv = fly.fv.gid.GetView(); let n = 0; for (let i = 0; i < gv.length; i++) if (gv[i] === gid) n++; return n; })() : 'no-fv' });
   }
   else if (m.type === 'takeoff') { fly.requestTakeoff(); postPose(); }

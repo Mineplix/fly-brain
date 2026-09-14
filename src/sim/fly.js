@@ -15,7 +15,7 @@ import { createBrain } from '../brainmodel.js';
 const Rt9 = (xm, b) => [xm[b * 9], xm[b * 9 + 3], xm[b * 9 + 6]];   // body x axis (heading) in world frame
 
 export class FlyAgent {
-  constructor({ mj, flyXML, env, data, size, sign, bodymap, gait, id = 0, pos = [0, 0], yaw = 0, nProxies = 0, mode = 'descending', brainOpts = {}, vision = true, brain = null, flyvis = null, intrinsic = true, seed = 0, neuromod = null, sex = 'm', look = null, mushroom = null, learn = true, etaMul = 1 }) {
+  constructor({ mj, flyXML, env, data, size, sign, bodymap, gait, id = 0, pos = [0, 0], yaw = 0, nProxies = 0, mode = 'descending', brainOpts = {}, vision = true, brain = null, flyvis = null, intrinsic = true, seed = 0, neuromod = null, sex = 'm', look = null, mushroom = null, learn = true, etaMul = 1, mbParams = null }) {
     this.id = id; this.mj = mj; this.env = env; this.data = data; this.vision = vision; this.sex = sex;
     // Reflectance of the checker floor and striped wall, matching whatever the host is drawing.
     // Defaults are the original muted arena; the circus theme is far higher contrast.
@@ -30,10 +30,11 @@ export class FlyAgent {
     this.sensorAdr = {}; for (let i = 0; i < M.nsensor; i++) this.sensorAdr[M.sensor(i).name] = M.sensor_adr[i];
     this.jointAdr = {}; for (let j = 0; j < M.njnt; j++) this.jointAdr[M.jnt(j).name] = M.jnt_qposadr[j];
     // geoms: albedo for vision; which bodies count as "self body" for bristle contact
-    this.geomKind = []; for (let g = 0; g < M.ngeom; g++) { const n = M.geom(g).name; this.geomKind.push(n === 'floor' ? 'floor' : n.startsWith('wall') ? 'wall' : n.startsWith('food') ? 'food' : n.startsWith('bitter') ? 'bitter' : n.startsWith('hazard') ? 'hazard' : n.startsWith('obst') ? 'obst' : n.startsWith('proxy') ? 'fly' : n.startsWith('threat') ? 'threat' : n.startsWith('janus') ? 'janus' : 'self'); }
+    this.geomKind = []; for (let g = 0; g < M.ngeom; g++) { const n = M.geom(g).name; this.geomKind.push(n === 'floor' ? 'floor' : n.startsWith('wall') ? 'wall' : n.startsWith('food') ? 'food' : n.startsWith('bitter') ? 'bitter' : n.startsWith('hazard') ? 'hazard' : n.startsWith('obst') ? 'obst' : n.startsWith('proxy') ? 'fly' : n.startsWith('threat') ? 'threat' : n.startsWith('janus') ? 'janus' : n.startsWith('monster') ? 'monster' : 'self'); }
     this.floorGeom = M.geom('floor').id;
     this.threatMocap = M.body_mocapid[M.body('threat').id];
     this.janusMocap = M.body_mocapid[M.body('janus').id];
+    this.monsterMocap = M.body_mocapid[M.body('monster').id];
     // brain
     this.brain = brain || createBrain(data, size, brainOpts, sign);   // wasm brain can be injected (shared connectome memory)
     // hunger as hormones and octopamine (neuromod: { calib: neuromod.json, block }); needs brainOpts.neuromod, which
@@ -54,7 +55,7 @@ export class FlyAgent {
     this.flight = new Flight({ mj, model: M, data: this.mjd, thorax: this.bid.thorax, jointAdr: this.jointAdr, act: this.motor.act, range: this.motor.range, rand: this.intrinsic?.rand });
     // Per-fly associative memory over the KC->MBON slice. Private to this animal; the shared
     // connectome is never written. Stage 1: allocated and stepped, but learns nothing yet.
-    this.mb = mushroom ? new MushroomBody(mushroom, this.brain, { learn, etaMul }) : null;
+    this.mb = mushroom ? new MushroomBody(mushroom, this.brain, { learn, etaMul, ...(mbParams || {}) }) : null;
     this.flights = 0;
     this.driven = new Int32Array(0);
     // physiology
@@ -106,6 +107,7 @@ export class FlyAgent {
   albedo = (g, x, y) => {
     const k = this.geomKind[g], L = this.look;
     if (k === 'threat') return 0.03;
+    if (k === 'monster') return 0.04;   // near-black: a dark mass looming, not a bright object
     // Janus is emissive, not reflective: the sky is divided out so the orb stays the brightest
     // thing in the ring even with the lights down. `glow` already carries the arrival/departure
     // ramp, so the flies see it brighten in and dim out rather than appear instantaneously.
@@ -129,6 +131,8 @@ export class FlyAgent {
     if (th) { d.mocap_pos[tm] = th.x; d.mocap_pos[tm + 1] = th.y; d.mocap_pos[tm + 2] = th.z; } else if (d.mocap_pos[tm + 2] > -10) d.mocap_pos[tm + 2] = -20;
     const jn = this.env.janus, jm = this.janusMocap * 3;
     if (jn) { d.mocap_pos[jm] = jn.x; d.mocap_pos[jm + 1] = jn.y; d.mocap_pos[jm + 2] = jn.z; } else if (d.mocap_pos[jm + 2] > -10) d.mocap_pos[jm + 2] = -20;
+    const mo = this.env.monster, mm = this.monsterMocap * 3;
+    if (mo) { d.mocap_pos[mm] = mo.x; d.mocap_pos[mm + 1] = mo.y; d.mocap_pos[mm + 2] = mo.z; } else if (d.mocap_pos[mm + 2] > -10) d.mocap_pos[mm + 2] = -20;
     const st = this.state();
     const rates = this.senses.update(st, this.env, 1); this._sugar = st.sugar;
     if (this.eye && (this.t % 10 === 0)) { this._eyeRates = new Map(); const er = this._eyeRates; this.eye.update({ set: (ix, hz) => { for (const i of ix) er.set(i, hz); } }, this.env, 10, this.albedo); }

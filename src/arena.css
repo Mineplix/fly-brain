@@ -95,3 +95,15 @@ a { color: var(--acc); }
   font-size: 10px; font-weight: 500; letter-spacing: .06em;
   text-transform: uppercase; color: var(--dim);
 }
+
+/* per-fly eye rows: one pair of 721-column luminance maps per fly, like the neural stack */
+#eyerows { display: flex; flex-direction: column; gap: 6px; }
+#eyerows .eyerow { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; position: relative; }
+#eyerows .eyerow canvas { width: 100%; height: auto; display: block; border-radius: 4px; background: #05070c; }
+#eyerows .eyerow .who {
+  position: absolute; left: 4px; top: 3px; z-index: 1; pointer-events: none;
+  font-size: 9px; letter-spacing: .04em; color: #cbd5e1;
+  text-shadow: 0 1px 3px rgba(0,0,0,.9); display: flex; align-items: center; gap: 4px;
+}
+#eyerows .eyerow .who i { width: 6px; height: 6px; border-radius: 50%; display: inline-block; }
+#eyerows .eyerow.sel canvas { outline: 1px solid var(--acc); outline-offset: -1px; }

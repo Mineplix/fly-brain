@@ -145,6 +145,53 @@ const ADVENTURES = [
       env.hazards = []; env.bitterPatches = []; env.wind = [0, 0];
     },
   },
+  {
+    name: 'The Dungeon',
+    line: 'The big top is GONE. Welcome to the dungeon. Mind the flagstones.',
+    look: 'dungeon',
+    apply: env => {
+      env.light.sky = 0.35;
+      env.obstacles = [
+        { type: 'cylinder', x: -0.8, y: 0.9, r: 0.16, sz: 0.9 },
+        { type: 'cylinder', x: 0.9, y: 0.8, r: 0.16, sz: 0.9 },
+        { type: 'cylinder', x: -0.9, y: -0.8, r: 0.16, sz: 0.9 },
+        { type: 'box', x: 0.4, y: -1.3, sx: 0.9, sy: 0.08, sz: 0.45 },
+      ];
+      env.food = [{ x: 1.7, y: -1.5, r: 0.26, sugar: 1, bitter: 0, water: 0.3, amount: 6 }];
+      env.odors = [{ x: 1.7, y: -1.5, odor: 'vinegar', strength: 1.2, sigma: 1.3 }];
+      env.hazards = []; env.bitterPatches = []; env.wind = [0, 0];
+    },
+    restore: env => { env.light.sky = 1; env.obstacles = []; },
+  },
+  {
+    name: 'The Sunken Cavern',
+    line: 'Down, down, down we go. It is damp. I did warn you. I did not warn you.',
+    look: 'cavern',
+    apply: env => {
+      env.light.sky = 0.28; env.humidity = 0.9;
+      env.obstacles = [
+        { type: 'cylinder', x: 0.2, y: 1.2, r: 0.22, sz: 0.7 },
+        { type: 'cylinder', x: -1.2, y: -0.3, r: 0.28, sz: 0.55 },
+      ];
+      env.food = [{ x: -1.4, y: 1.3, r: 0.3, sugar: 1, bitter: 0, water: 0.9, amount: 6 }];
+      env.odors = [{ x: -1.4, y: 1.3, odor: 'vinegar', strength: 1, sigma: 1.4 }];
+      env.hazards = []; env.bitterPatches = []; env.wind = [2, 1];
+    },
+    restore: env => { env.light.sky = 1; env.humidity = 0.45; env.obstacles = []; },
+  },
+  {
+    name: 'The Beast',
+    line: 'Something has got IN. I did not book this. RUN!',
+    look: 'dungeon',
+    monster: true,
+    apply: env => {
+      env.light.sky = 0.4;
+      env.food = [{ x: 1.6, y: 1.4, r: 0.3, sugar: 1, bitter: 0, water: 0.3, amount: 6 }];
+      env.odors = [{ x: 1.6, y: 1.4, odor: 'vinegar', strength: 1, sigma: 1.2 }];
+      env.hazards = []; env.bitterPatches = []; env.wind = [0, 0]; env.obstacles = [];
+    },
+    restore: env => { env.light.sky = 1; },
+  },
 ];
 
 // --- engine ------------------------------------------------------------------------------
@@ -157,14 +204,18 @@ const COMMANDS = [
   { re: /\b(wind|breeze|storm|gale|weather)\b/i, adventure: 'A Stiff Breeze' },
   { re: /\b(dark|night|lights?\s*(out|down)|blackout)\b/i, adventure: 'Lights Down' },
   { re: /\b(threat|predator|danger|scary|swat|wicked)\b/i, adventure: 'Something Wicked' },
+  { re: /\b(dungeon|castle|cell|crypt|stone)\b/i, adventure: 'The Dungeon' },
+  { re: /\b(cavern|cave|underground|sunken|damp)\b/i, adventure: 'The Sunken Cavern' },
+  { re: /\b(monster|beast|creature|chase|hunter|hunted|maw)\b/i, adventure: 'The Beast' },
 ];
 const CONFUSED = [
   'I have absolutely no idea what that means, and I adore that about you.',
-  'Not in the repertoire, I am afraid. Try: sugar, bitter, lava, wind, lights out, threat.',
+  'Not in the repertoire, I am afraid. Try: sugar, bitter, lava, wind, lights out, threat, dungeon, cavern, monster.',
   'A bold suggestion! Sadly the budget says no.',
 ];
 
 export function startRingmaster(arena, { period = 75000, onLine = null } = {}) {
+  const BASE_LOOK = arena.theme || 'circus';   // the look to restore for adventures that don't set one
   const el = document.createElement('div');
   el.id = 'ringmaster';
   el.innerHTML = '<b></b><span></span>';
@@ -194,16 +245,23 @@ export function startRingmaster(arena, { period = 75000, onLine = null } = {}) {
 
   function runAdventure(which = null) {
     if (adventure?.restore) adventure.restore(arena.env);
+    arena.recallMonster?.();          // never leave a beast loose across a scene change
     if (which) { idx = ADVENTURES.findIndex(a => a.name === which); if (idx < 0) idx = 0; }
     else idx = (idx + 1 + ((Math.random() * (ADVENTURES.length - 1)) | 0)) % ADVENTURES.length;
     adventure = ADVENTURES[idx];
     say(pick(ADVENTURE_CALL), { priority: 2 });
     setTimeout(() => {
       adventure.apply(arena.env);
+      // Restaging goes through setLook, which rebuilds the scene AND hands the new reflectances
+      // to every fly. An adventure that only repainted our view would be a lie to the flies.
+      arena.setLook?.(adventure.look || BASE_LOOK);
       arena.rebuildEnv();
       for (const f of arena.flies) if (f.ready) f.worker.postMessage({ type: 'env', env: arena.env });
       say(adventure.line, { priority: 2 });
       if (adventure.threat && arena.launchThreat) setTimeout(() => arena.launchThreat(), 6000);
+      if (adventure.monster && arena.releaseMonster) setTimeout(() => {
+        if (arena.releaseMonster()) say('There. In the dark. Do you see it?', { priority: 3 });
+      }, 4000);
     }, 2600);
   }
 

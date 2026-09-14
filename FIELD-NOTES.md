@@ -1378,6 +1378,7 @@ thermosensory at 0 in both (no hazard) — the two antennal channels stay indepe
 | `?learn=0` | fixed-weight brain, no mushroom-body plasticity |
 | `?eta=X` | multiply the learning rate (dose-response) |
 | `?persist=0` | don't save or restore flies (use for any benchmark or controlled run) |
+| `?dafloor=X` | phasic-dopamine gate threshold (default 0.15); ALWAYS pair with an unpunished control |
 | `?cond=1` | run the differential-conditioning probe |
 | `?train=N` | training seconds for that probe |
 
@@ -1527,3 +1528,156 @@ header followed by the raw Float32 array) when you want them on disk.
 
 > ⚠️ **Use `?persist=0` for any benchmark or controlled run.** A fly that remembers the last
 > experiment is not a naive subject, and a restored cast is not the preset's cast.
+
+---
+
+## 21. Trying to show learned weights survive a reload — and why it failed
+
+The persistence mechanism is proven (Section 20). Showing *naturally learned* weights surviving
+a reload is not, and the reason turned out to be a property of the model rather than a shortage
+of patience.
+
+### What the gate needs
+
+    popFast   300 ms smoothing of the summed DAN trace
+    popBase   8 s slow reference that popFast is compared against
+    popRel    (popFast - popBase) / popBase
+    gate      (popRel - phasicFloor) * phasicGain,  phasicFloor = 0.15
+
+Learning happens only while `gate > 0`.
+
+### Three protocol errors, all mine
+
+1. **Constant punishment teaches nothing.** Heat on from t = 0 and left on for 22 s sim gave
+   `dan` 47.8 (elevated), `kc` 316, `popRel` 0.063, `gate` 0, zero edges changed. An 8 s
+   reference absorbs a constant level. The heat was also on *during* the 4 s warm-up, so both
+   references seeded at the punished value. This is the rule working as designed — it ignores
+   tonic dopamine, which is exactly why it was written that way.
+
+2. **An 8 s reference needs far more than 10 s to forget.** Clearing the heat and waiting ~10 s
+   sim before pulsing bouts gave `popRel` peaks of 0.073: `popBase` had decayed only ~70% of the
+   way back. After sustained punishment, allow several multiples of `popBaseMs` before treating
+   the next onset as clean.
+
+3. **Predicting a threshold crossing from a slope.** I reported popRel was "rising ~0.06 per
+   0.4 s with 1.5 s left, so it should cross". It plateaued at 0.073 and fell back. `popFast` is
+   a 300 ms exponential approaching a ceiling, not a ramp; its early slope says nothing about
+   where it lands.
+
+### The real finding: rest and punishment are not separable
+
+Fresh page load, references seeded at rest during warm-up, odour throughout, 6 s of rest, then
+heat on:
+
+| condition | peak `popRel` | gate |
+|---|---|---|
+| rest (point sample) | 0.002 | 0 |
+| punished, heat 0.5 | 0.111 | 0 |
+| punished, heat 1.0 | 0.099 | 0 (and health fell to 0.65) |
+
+Doubling the punishment did not raise the response — **the nociceptive drive saturates**, so
+punishment strength is not a lever.
+
+Then, on instruction, the floor was lowered to 0.05 and run *with an unpunished control first*:
+
+    control, 8 s, NO punishment:
+      popRel   median 0    p90 0.056    max 0.108
+      gate fired on 17 of 145 samples, peak 0.127
+      edges depressed: 1,094
+
+> ⚠️ **The control is the whole result.** 1,094 edges depressed with nothing happening at all.
+> Unpunished `popRel` maxes at 0.108; punished peaks at 0.111. There is essentially no
+> separation, so no threshold can distinguish them. Lowering the gate does not produce learning
+> — it reproduces the original tonic-dopamine bug, which is precisely what the floor exists to
+> prevent.
+
+> ⚠️ **I justified the 0.05 floor with a bad measurement.** I claimed rest "sits at 0.002, so
+> 0.05 is 25x above resting noise". That came from a single point sample. The resting
+> *distribution* reaches 0.108. Characterise a noise floor with a distribution, never one
+> sample — and never set a threshold from the one sample.
+
+The default stays at **0.15**, which sits just above resting noise and is correctly placed.
+`?dafloor=X` exists to experiment, and any value used must be checked against an unpunished
+control or it is measuring nothing. The open problem is upstream: punishment does not produce a
+dopamine response distinguishable from rest in this build.
+
+### Throughput measured in the embedded Browser pane
+
+    vision off, tab fronted   0.031x
+    vision on,  tab fronted   0.0068x
+
+`requestAdapter()` reported **"intel"** — the pane runs on the integrated GPU. The
+`GpuPreference` registry fix applies to `chrome.exe`, not to this Electron binary, so the 0.065x
+figure from real Chrome does not transfer. Check the adapter string before trusting any rate.
+
+---
+
+## 22. Every fly's eyes, not just the selected one
+
+The brain panel showed one pair of 721-column luminance maps while the neural stack beside it
+showed every fly — visibly inconsistent, and the fix was nearly free.
+
+The activity poll was **already** round-robin across every fly; each reply carries that fly's
+`lumEye` pair. Only the selected fly's was being drawn and the rest were discarded. Now each fly
+gets its own labelled row, painted from its own reply, and clicking a row selects that fly. No
+extra message traffic.
+
+The heavy work — the 165k-neuron trace into the rotating inset, and the per-group Hz history —
+stays selected-only, because that is the part that actually costs something.
+
+> Note for testing: the poll returns early when `document.hidden` is true **or** the brain panel
+> is folded, and the fold state persists across reloads. A blank eye panel during testing is
+> usually a folded panel from an earlier session, not a bug. Posting `{type:'activity'}` to the
+> workers directly bypasses both and is the way to verify the draw path.
+
+---
+
+## 23. Janus restages the world, and something hunts
+
+### Environments
+
+`LOOK` was a `const` chosen once by `?theme`. It is now a `LOOKS` registry — `circus`, `lab`,
+`dungeon`, `cavern`, `lab2` — and a mutable `LOOK`, with `setLook(name)`.
+
+`rebuildEnv()` already regenerates the floor texture, wall, bunting, tent and props from `LOOK`,
+so changing `LOOK` and rebuilding restages the whole set. The line that matters biologically is
+the last one: `setLook` posts the new `albedo` block to every worker, so **a dungeon is genuinely
+darker to the flies' photoreceptors than the big top was**.
+
+| look | floor albedo | wall albedo |
+|---|---|---|
+| circus | 0.06 – 0.92 | 0.29 – 0.77 |
+| dungeon | 0.10 – 0.26 | 0.06 – 0.16 |
+| cavern | 0.07 – 0.22 | 0.04 – 0.13 |
+| lab2 | 0.72 – 0.91 | 0.45 – 0.68 |
+
+A look change also clears `fv.settled`, so the optic lobe re-settles against the new scene
+instead of reading the swap as one enormous transient.
+
+Three new adventures use it: **The Dungeon** (pillars, a back wall, food at the far end),
+**The Sunken Cavern** (damp — humidity 0.9, which the hygrosensory channel actually reads), and
+**The Beast**. Commands: `dungeon`, `cavern`, `monster`.
+
+### The monster
+
+A dark mass that pursues the nearest living fly. Like Janus it is a real mocap geom in every
+fly's world so the eye rays hit it; unlike Janus its albedo is **0.04**, so it reads as a dark
+shape growing in the visual field.
+
+Crucially it does not get its own bespoke escape hook. While hunting it drives `env.threat`
+whenever it is within 1.1 cm of a fly, which is the *existing* looming channel into DNp01 and
+the giant-fibre reflex. The flies flee it through the pathway a real looming predator would use.
+
+Measured, one fly, samples 2.5 s apart:
+
+    dist (cm)   2.25  2.19  2.10  2.05  2.00  1.96  1.87  1.83  1.79  1.74
+    eye rays       7     7     7     8     8     8     9     9     9    11
+
+Distance falls monotonically (it chases) and the ray count rises as it closes (it looms). That
+growth *is* the stimulus — a dark object subtending an increasing solid angle.
+
+It is non-colliding on purpose: a kinematic body shoved through the solver at a walking fly is a
+good way to wedge the contact solver. It eases to 15% speed within 0.22 cm so it stalks rather
+than jittering through its target, is clamped inside the wall, and is recalled automatically at
+the end of its hunt and before any scene change — `recallMonster()` runs at the top of
+`runAdventure`, so a beast is never left loose across a restage.
