@@ -644,7 +644,72 @@ whether `?vision=0` raises the Phase 3 knee above 6.
 
 ---
 
-## 10. Open questions for later phases
+## 10. The circus arena (`?theme=`)
+
+Restyle toward the Amazing Digital Circus big-top look. `circus` is now the **default**;
+`?theme=lab` restores the original muted arena.
+
+### 10.1 Where the arena actually lives
+
+Everything visible is built procedurally in `rebuildEnv()` (`src/arena.js`) from canvas
+textures — there is no arena asset to edit:
+
+| element | how it is made |
+|---|---|
+| floor | 2×2 checker on a 64 px canvas, `RepeatWrapping`, 0.4 cm tiles |
+| wall | 24 stripes on a 1024×8 canvas, mapped to an open-ended cylinder, `BackSide` |
+| obstacles | `BoxGeometry` / `CylinderGeometry` with a flat colour |
+| food / bitter / hazard | flat `CircleGeometry` discs |
+| odour plumes | radial-gradient canvas, additive-ish transparent disc |
+
+(`public/body/blender/arena.*` exists and is loaded by `loadArenaDetail`, but the arena
+*shell* above is all procedural, so restyling needs no Blender round-trip.)
+
+### 10.2 What changed
+
+- **Floor** `#12121a` / `#f0ede4` — near-black and off-white checker
+- **Wall** `#e02128` / `#f6c624` — red/yellow tent stripes, still 24 of them so the
+  existing albedo sector maths (`Math.PI / 12`) stays valid
+- **Bunting** — new `addBunting()`: a ring of 32 triangular pennants in four colours, plus
+  a dark cord. Built as **one alpha-cut texture on a short cylinder band**, not 32 meshes,
+  so it is a single draw call and stays out of the shadow and AO passes
+- **Props** — obstacles cycle through six saturated colours instead of one dark green
+- **Sky** `#1a0f1e`, **food discs** `#ffd84d`
+
+### 10.3 ❗ It is not only cosmetic — the flies see it
+
+`FlyAgent.albedo()` is what the 1,442 eye rays sample every 20 ms, and it **hardcoded the
+old arena's reflectances**. A restyle that touched only Three.js would have left the flies
+seeing a tan arena that no longer existed.
+
+`albedo()` now takes a `look` object threaded host → worker → `FlyAgent`, defaulting to the
+old values. Consequence, in Michelson contrast:
+
+| surface | lab | circus | |
+|---|---:|---:|---|
+| floor | 0.263 | **0.878** | **3.3× stronger** |
+| wall | 0.667 | **0.453** | ~⅓ weaker |
+
+So circus flies get a **much stronger optic-flow signal from the floor** and a **weaker one
+from the wall**. Expect that in course control (floor optic flow is a major input to
+walking speed and straightness) and in wall-following. ❓ Predicted, not yet measured.
+
+Amusing corollary: the black/white checker is close to the high-contrast gratings used in
+real *Drosophila* optomotor experiments, so the circus arena is arguably a *better* visual
+stimulus than the muted one it replaces.
+
+### 10.4 ⚠️ Not visually verified
+
+Syntax-checked, and the theme resolution and fallback were unit-tested in Node. **No
+screenshot was taken.** The automation browser wedged under memory pressure (free RAM
+reached 763 MB, with Roblox at 1.4 GB alongside a stuck tab) and two navigations timed out
+at 300 s. Nothing in the rendering path is confirmed working end to end.
+
+First thing to do next session: open `arena.html` in a real browser and look at it.
+
+---
+
+## 11. Open questions for later phases
 
 - Does `powerPreference: 'high-performance'` in `lifgpu.js:158` change the picture on the
   4050? If WebGPU on discrete silicon beats 0.043×, the whole Phase 3 calculus changes.
