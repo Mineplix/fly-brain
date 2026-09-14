@@ -46,3 +46,17 @@ a { color: var(--acc); }
 #groups .v .l, #groups .v .r { background: none; display: block; }
 #groups .info { grid-column: 1 / -1; color: var(--dim); font-size: 11.5px; padding: 2px 0 4px 14px; }
 #brain { flex: none; width: 100%; height: 220px; border-top: 1px solid var(--line); background: rgba(5,7,12,.6); }
+
+/* six-panel neural stack: one small brain per fly, stacked, all updating live */
+#stack { margin: 0 0 12px; }
+#stack[hidden] { display: none; }
+#stack .sthead { display: flex; justify-content: space-between; align-items: baseline; font-size: 11px; font-weight: 600; color: var(--fg); margin-bottom: 5px; }
+#stack .sthead #stCount { font-weight: 400; color: var(--dim); }
+#stWrap { position: relative; border-radius: 6px; overflow: hidden; background: #03080a; }
+#stackCanvas { width: 100%; display: block; }
+#stLabels { position: absolute; inset: 0; pointer-events: none; }
+#stLabels .r { position: absolute; left: 0; right: 0; display: flex; align-items: center; gap: 5px; padding: 3px 6px; }
+#stLabels .r b { font-size: 10px; font-weight: 700; color: #a9f7c6; text-shadow: 0 1px 2px rgba(0,0,0,.9); letter-spacing: .04em; }
+#stLabels .r i { width: 7px; height: 7px; border-radius: 50%; flex: none; }
+#stLabels .r.sel b { color: #fff; }
+#stLabels .r .hz { margin-left: auto; font-size: 9px; color: #6fbf90; text-shadow: 0 1px 2px rgba(0,0,0,.9); }

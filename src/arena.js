@@ -178,6 +178,88 @@ function buildScene(data) {
   hlPts = new THREE.Points(new THREE.BufferGeometry(), new THREE.PointsMaterial({ size: 7, sizeAttenuation: false, transparent: true, opacity: 1, depthWrite: false, depthTest: false }));
   hlPts.visible = false; brainScene.add(hlPts);
   brainCam.position.set(0, 0, 1050); brainCam.lookAt(0, 0, 0); brainAct = new Float32Array(data.N);
+  buildStack(data);
+}
+
+// ---------------- neural stack: every fly's brain at once ----------------
+// One renderer, one shared position buffer, and a per-fly colour buffer swapped in before each
+// row is drawn -- so a fly's colours are uploaded only when its trace arrives, not every frame.
+// Somas are subsampled (STACK_STRIDE) because each row is ~84 px tall and 165k points into that
+// is wasted bandwidth.
+let stackRenderer, stackScene, stackCam, stackPts, stackIdx = null;
+const stackCols = [];                 // per fly: THREE.BufferAttribute of colours
+const STACK_STRIDE = 2, STACK_ROW = 84;
+let stackRows = -1, stackSpin = 0;
+function buildStack(data) {
+  const keep = [];
+  for (let i = 0; i < data.N; i += STACK_STRIDE) if (Number.isFinite(data.soma[i * 3])) keep.push(i);
+  stackIdx = Int32Array.from(keep);
+  const n = stackIdx.length, pos = new Float32Array(n * 3); const c = new THREE.Vector3();
+  for (let k = 0; k < n; k++) { const i = stackIdx[k];
+    pos[k * 3] = data.soma[i * 3] * 8e-3; pos[k * 3 + 1] = data.soma[i * 3 + 1] * 8e-3; pos[k * 3 + 2] = data.soma[i * 3 + 2] * 8e-3;
+    c.x += pos[k * 3]; c.y += pos[k * 3 + 1]; c.z += pos[k * 3 + 2]; }
+  c.divideScalar(n);
+  for (let k = 0; k < n; k++) { pos[k * 3] -= c.x; pos[k * 3 + 1] -= c.y; pos[k * 3 + 2] -= c.z; }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+  g.setAttribute('color', new THREE.BufferAttribute(new Float32Array(n * 3), 3));   // placeholder, swapped per row
+  stackPts = new THREE.Points(g, new THREE.PointsMaterial({ size: 1, sizeAttenuation: false, vertexColors: true, transparent: true, opacity: 0.92, depthWrite: false }));
+  stackPts.rotation.x = Math.PI;
+  stackScene = new THREE.Scene(); stackScene.add(stackPts);
+  stackCam = new THREE.PerspectiveCamera(40, 1, 1, 20000); stackCam.position.set(0, 0, 1080); stackCam.lookAt(0, 0, 0);
+  stackRenderer = new THREE.WebGLRenderer({ canvas: $('#stackCanvas'), antialias: false, alpha: true });
+  stackRenderer.setPixelRatio(Math.min(devicePixelRatio, 1.5));
+  stackRenderer.autoClear = false; stackRenderer.setScissorTest(true);   // many viewports, one canvas
+}
+/** allocate a colour buffer for a newly spawned fly, at its resting (unspiked) colour */
+function stackAddFly(i) {
+  if (!stackIdx || stackCols[i]) return;
+  const a = new Float32Array(stackIdx.length * 3);
+  for (let k = 0; k < stackIdx.length; k++) { a[k * 3] = 0.03; a[k * 3 + 1] = 0.09; a[k * 3 + 2] = 0.06; }
+  stackCols[i] = new THREE.BufferAttribute(a, 3).setUsage(THREE.DynamicDrawUsage);
+}
+/** write one fly's spike trace into its colour buffer: dark teal at rest -> bright green when firing */
+function stackTrace(i, trace) {
+  const attr = stackCols[i]; if (!attr || !stackIdx) return;
+  const a = attr.array, idx = stackIdx;
+  for (let k = 0; k < idx.length; k++) {
+    const v = Math.min(1, trace[idx[k]] * 1.6);
+    a[k * 3] = 0.03 + v * 0.34; a[k * 3 + 1] = 0.09 + v * 0.88; a[k * 3 + 2] = 0.06 + v * 0.38;
+  }
+  attr.needsUpdate = true;
+}
+let stackLabelKey = '';
+function stackLabels() {
+  const key = flies.length + ':' + selected;   // renderFlyList also ticks every 500 ms; don't wipe the live Hz readouts
+  if (key === stackLabelKey) return;
+  stackLabelKey = key;
+  const host = $('#stLabels'); host.innerHTML = '';
+  flies.forEach((f, i) => {
+    const d = document.createElement('div'); d.className = 'r' + (f.id === selected ? ' sel' : '');
+    d.style.top = (i * STACK_ROW) + 'px';
+    d.innerHTML = `<b>#${f.id}</b><i style="background:${f.color}"></i><span class="hz"></span>`;
+    host.appendChild(d);
+  });
+  $('#stCount').textContent = flies.length + (flies.length === 1 ? ' fly' : ' flies');
+  $('#stack').hidden = flies.length === 0;
+}
+function drawStack() {
+  const n = flies.length; if (!stackRenderer || !n || $('#stack').hidden) return;
+  const wrap = $('#stWrap'), w = Math.max(1, wrap.clientWidth), h = n * STACK_ROW;
+  if (stackRows !== n || stackRenderer.domElement.width === 0) {
+    $('#stackCanvas').style.height = h + 'px'; stackRenderer.setSize(w, h, false);
+    stackCam.aspect = w / STACK_ROW; stackCam.updateProjectionMatrix(); stackRows = n;
+  }
+  stackSpin += 0.005; stackPts.rotation.y = stackSpin;
+  stackRenderer.setViewport(0, 0, w, h); stackRenderer.setScissor(0, 0, w, h); stackRenderer.clear();   // setViewport takes CSS px; three applies the pixel ratio
+  for (let i = 0; i < n; i++) {
+    const col = stackCols[i]; if (!col) continue;
+    stackPts.geometry.setAttribute('color', col);
+    const y = h - (i + 1) * STACK_ROW;          // three's viewport origin is bottom-left; rows read top-down
+    stackRenderer.setViewport(0, y, w, STACK_ROW); stackRenderer.setScissor(0, y, w, STACK_ROW);
+    stackRenderer.render(stackScene, stackCam);
+  }
+  metrics.brainDraws += n;
 }
 let pd = null;
 function discMesh(r, color, opacity = 1, z = 0.0015) { const m = new THREE.Mesh(new THREE.CircleGeometry(r, 48), new THREE.MeshStandardMaterial({ color, transparent: opacity < 1, opacity, roughness: 0.8 })); m.position.z = z; m.receiveShadow = true; return m; }
@@ -281,7 +363,7 @@ async function addFly(pos, yaw, sex = 'm') {
   const id = nextId++; const color = FLY_COLORS[id % FLY_COLORS.length];
   const worker = new Worker(new URL('./sim/fly.worker.js', import.meta.url), { type: 'module' });
   const f = { id, worker, color, sex, ready: false, last: null, prev: null, stats: {}, ...buildFlyMesh(color, sex) };
-  scene.add(f.group); flies.push(f); batches.add(f);
+  scene.add(f.group); flies.push(f); batches.add(f); stackAddFly(flies.length - 1);
   worker.onmessage = e => onWorker(f, e.data);
   worker.postMessage({ type: 'init', id, graph: shared, meta, bodymap, flyXML, gait, env, pos, yaw, nProxies: MAX_FLIES - 1, mode: $('#mode').value, brainOpts: brainParams, neuromod: neuromodCalib, vision: !NO_VISION, sex, look: LOOK.albedo,
     brainMem: { memory: brainMem.memory, graph: brainMem.graph, bases: brainMem.bases, opts: brainMem.opts, fv: brainMem.fv }, wasmModule, slot: id, flyvisMap });
@@ -299,8 +381,13 @@ function onWorker(f, m) {
     m.foodEaten?.forEach((d, k) => { if (d > 0 && env.food[k]) { env.food[k].amount = Math.max(0, env.food[k].amount - d); foodDirty = true; } });
     if (f.id === selected && (f.prev?.takeoffPending !== m.takeoffPending || f.prev?.flying !== m.flying)) renderFlyList();
     broadcastOthers();
-  } else if (m.type === 'activity' && f.id === selected && (f.activityTime !== m.t || histFly !== f.id)) {
-    f.activityTime = m.t; brainAct.set(m.trace); brainDirty = true; onActivity(f, m);
+  } else if (m.type === 'activity') {
+    const k = flies.indexOf(f); if (k >= 0) stackTrace(k, m.trace);           // every fly feeds its own stack row
+    const row = $('#stLabels')?.children[k]?.querySelector('.hz');
+    if (row) row.textContent = (m.groups.reduce((s, x) => s + x, 0) / m.groups.length).toFixed(1) + ' Hz';
+    if (f.id === selected && (f.activityTime !== m.t || histFly !== f.id)) {   // the selected fly also drives the big inset
+      f.activityTime = m.t; brainAct.set(m.trace); brainDirty = true; onActivity(f, m);
+    }
   }
 }
 let foodDirty = false, lastOthers = 0;
@@ -322,7 +409,19 @@ function buildUI() {
   $('#mode').onchange = e => { for (const f of flies) f.worker.postMessage({ type: 'mode', mode: e.target.value }); };
   document.querySelectorAll('.tools button').forEach(b => b.onclick = () => { tool = b.dataset.tool; document.querySelectorAll('.tools button').forEach(x => x.classList.toggle('on', x === b)); });
   setupFolds();
-  setInterval(() => { const f = flies.find(x => x.id === selected); if (!document.hidden && f?.ready && !$('#brainpanel').classList.contains('folded')) f.worker.postMessage({ type: 'activity' }); }, 120);
+  // Each activity reply carries the full 165k-neuron trace (~660 kB), so polling every fly at
+  // this rate would multiply the message traffic by the fly count. Instead poll round-robin:
+  // total traffic stays one message per tick as before. The selected fly takes every other
+  // slot so the big inset stays responsive; the rest share the remainder.
+  let pollTurn = 0;
+  setInterval(() => {
+    if (document.hidden || $('#brainpanel').classList.contains('folded')) return;
+    const ready = flies.filter(x => x.ready); if (!ready.length) return;
+    const sel = ready.find(x => x.id === selected);
+    const f = (sel && (pollTurn & 1)) ? sel : ready[(pollTurn >> 1) % ready.length];
+    pollTurn++;
+    f.worker.postMessage({ type: 'activity' });
+  }, 120);
   $('#wind').oninput = e => { const v = +e.target.value; $('#windv').textContent = v; env.wind = [v, 0]; syncEnv(); };
   $('#light').oninput = e => { env.light.sky = +e.target.value; scene.background = new THREE.Color().setHSL(0.6, 0.3, 0.02 + 0.05 * env.light.sky); syncEnv(); };
   $('#threat').onclick = () => launchThreat();
@@ -344,6 +443,7 @@ function onClick(e) {
   rebuildEnv(); syncEnv();
 }
 function renderFlyList() {
+  stackLabels();
   $('#nfly').textContent = flies.length;
   $('#flies').innerHTML = flies.map(f => { const s = f.last || {}; const e = s.energy ?? 0, h = s.health ?? 1;
     return `<div class="fly ${f.id === selected ? 'sel' : ''}" data-id="${f.id}"><i class="dot" style="background:${f.color}"></i>
@@ -518,6 +618,7 @@ function animate() {
   }
   if (hover !== hlShown) showGroupInInset(hover);
   brainPts.rotation.y += elapsed * 0.12; hlPts.rotation.copy(brainPts.rotation); brainRenderer.render(brainScene, brainCam); metrics.brainDraws++;
+  drawStack();
 
 }
 main().catch(e => { if ($('#status')) status('error: ' + e.message); console.error(e); });
