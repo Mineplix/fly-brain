@@ -155,6 +155,7 @@ export class MushroomBody {
     this.ix = index; this.brain = brain;
     this.p = { ...MB_DEFAULTS, ...params };
     this.learn = params.learn !== false;
+    if (params.etaMul && params.etaMul !== 1) this.p.eta *= params.etaMul;   // dose-response knob
     // Depression fraction per edge, 0 = naive (full connectome weight), 1 = fully suppressed.
     this.depress = new Float32Array(index.nEdges);
     this.danDrive = new Float32Array(index.nMBON);   // phasic dopamine per compartment, recomputed each step

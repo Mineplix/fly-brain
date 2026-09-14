@@ -41,7 +41,10 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
 const sync = () => { for (const f of A.flies) if (f.ready) f.worker.postMessage({ type: 'env', env: A.env }); };
 // ?learn=0 must survive the protocol. The training phase explicitly enables plasticity, which
 // would otherwise re-enable it in the control and make the control identical to the test.
-const LEARN_OK = new URLSearchParams(location.search).get('learn') !== '0';
+const Q = new URLSearchParams(location.search);
+const LEARN_OK = Q.get('learn') !== '0';
+const TRAIN_MS = Math.max(1000, (Number(Q.get('train')) || 6) * 1000);
+const ETA_MUL = Number(Q.get('eta')) || 1;
 const setLearn = on => { for (const f of A.flies) f.worker.postMessage({ type: 'learn', on: on && LEARN_OK }); };
 
 /** Uniform odour across the whole arena, so the reading does not depend on where the fly wanders. */
@@ -98,6 +101,7 @@ try {
 
   say(LEARN_OK ? 'RUN: plasticity ON' : 'CONTROL: plasticity OFF (?learn=0)');
   say(`${N} flies = ${N} independent replicates (seeds differ by fly id)`);
+  say(`dose: eta x${ETA_MUL}, training ${(TRAIN_MS/1000).toFixed(1)} sim s`);
   say('CS+ vinegar (punished)   CS- geosmin (safe)');
   say('');
 
@@ -110,7 +114,7 @@ try {
 
   setLearn(true);
   present('vinegar', 0.5);
-  await phase('TRAINING — CS+ paired with heat', 6000);
+  await phase('TRAINING — CS+ paired with heat', TRAIN_MS);
   const dep = A.flies.map(f => f.last?.mb?.depressed ?? 0);
   setLearn(false);
   present(null, 0);
@@ -144,6 +148,6 @@ try {
   say(clear
     ? `aversive compartments: ${sg(a.mean)} +/- ${a.sd.toFixed(1)}, larger than the run-to-run spread.`
     : `aversive compartments: ${sg(a.mean)} +/- ${a.sd.toFixed(1)} -- not separable from noise at n=${ids.length}.`);
-  window.__cond = { n: ids.length, learn: LEARN_OK, dep, summary };
+  window.__cond = { n: ids.length, learn: LEARN_OK, etaMul: ETA_MUL, trainMs: TRAIN_MS, dep, summary };
   paint();
 } catch (e) { fail(e); }
