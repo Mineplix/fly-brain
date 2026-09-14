@@ -73,5 +73,20 @@
   </section>
 </aside>
 <script type="module" src="/src/arena.js"></script>
+<!-- TEMPORARY: ?cond=1 runs the differential-conditioning probe from public/conditioning.js.
+     Injects a tag rather than using import(): a dynamic import of a public/ file is not in Vite's
+     module graph, so it fails transform and the whole inline script 500s. -->
+<script>
+  if (new URLSearchParams(location.search).get('cond') === '1') {
+    var __c = setInterval(function () {
+      if (!window.__arena) return;
+      clearInterval(__c);
+      var s = document.createElement('script');
+      s.type = 'module'; s.src = '/conditioning.js';
+      s.onerror = function () { alert('conditioning.js failed to load'); };
+      document.head.appendChild(s);
+    }, 500);
+  }
+</script>
 </body>
 </html>
