@@ -110,14 +110,18 @@ export function buildMushroomIndex(data, memory, graph) {
 }
 
 export const MB_DEFAULTS = {
-  eta: 0.0016,       // depression per ms at full KC trace and a full phasic dopamine burst
+  eta: 0.0025,       // depression per ms at full KC trace and a full phasic dopamine burst
   danGain: 2.5,      // scales normalised dopamine into 0..1
-  phasicGain: 6,     // amplifies the above-baseline component (bursts are small next to tone)
+  phasicGain: 2.2,   // scales the relative rise past the deadband into 0..1
+  phasicFloor: 0.15, // measured: quiet sits at ~0.00, a hot floor drives popRel to 0.27-0.34+
+  popFastMs: 300,    // dopamine acts over hundreds of ms; smooths the 30 ms spike trace
+  popBaseMs: 8000,   // slow tonic reference the smoothed signal is compared against
   baseTauMs: 4000,   // how fast each compartment's dopamine baseline follows the tonic level
   recoverMs: 120000, // forgetting time constant, in simulated ms (~2 simulated minutes)
   kcEps: 1e-3,       // KC coding is sparse; skip rows below this trace
   danEps: 1e-3,
-  warmupMs: 1500,   // let the dopamine baseline settle before anything is allowed to learn
+  warmStartMs: 1200, // ignore the brain's own ramp-up before sampling the tonic level
+  warmupMs: 4000,    // end of the averaging window that seeds both dopamine references
 };
 
 /** Per-fly plastic state over the KC -> MBON slice. One of these per FlyAgent. */
@@ -131,8 +135,8 @@ export class MushroomBody {
     this.danDrive = new Float32Array(index.nMBON);   // phasic dopamine per compartment, recomputed each step
     this.danBase = new Float32Array(index.nMBON);    // slow tonic baseline it is measured against
     this.dirty = false;                  // set once anything is actually learned
-    this.stats = { kcDrive: 0, danDrive: 0, edges: index.nEdges, depressed: 0, meanDepress: 0, maxDepress: 0 };
-    this._acc = 0; this._sinceHouse = 0; this._primed = false; this._age = 0;
+    this.stats = { kcDrive: 0, danDrive: 0, mbonDrive: 0, phasicMax: 0, phasicPeak: 0, gate: 0, popRel: 0, edges: index.nEdges, depressed: 0, meanDepress: 0, maxDepress: 0 };
+    this._acc = 0; this._sinceHouse = 0; this._primed = false; this._age = 0; this._popBase = 0; this._popFast = 0; this._warmSum = 0; this._warmN = 0;
   }
 
   /**
@@ -147,32 +151,78 @@ export class MushroomBody {
   _dopamine(dtMs) {
     const { danRow, danPtr, danTarget, danW, danNorm } = this.ix;
     const trace = this.brain.trace, dd = this.danDrive, base = this.danBase;
-    const g = this.p.danGain, pg = this.p.phasicGain, kb = Math.min(1, dtMs / this.p.baseTauMs);
+    const g = this.p.danGain, kb = Math.min(1, dtMs / this.p.baseTauMs);
+
+    // 1. Raw dopaminergic drive per compartment, then immediately normalised. Everything
+    //    downstream works in these units -- mixing raw and normalised was a real bug here and
+    //    made the smoothed signal read 268% above its own baseline while nothing was happening.
+    // `pop` is the plain summed DAN trace, which is the quantity that was actually measured to
+    // separate rest from punishment (30.3 at rest vs 50.9 on a hot floor, non-overlapping). An
+    // earlier version gated on the MBON-weighted, per-compartment-normalised sum instead -- a
+    // different quantity, and the normalisation destroys the separation: punishment then read as
+    // a 20% *fall*. Normalisation still belongs on the per-compartment weighting below, just not
+    // on the detector.
     dd.fill(0);
+    let pop = 0;
     for (let r = 0; r < danRow.length; r++) {
       const tr = trace[danRow[r]];
+      pop += tr;
       if (tr < this.p.danEps) continue;
       for (let k = danPtr[r]; k < danPtr[r + 1]; k++) dd[danTarget[k]] += tr * danW[k];
     }
-    // The baseline starts at zero, so without priming the first seconds read as one enormous
-    // burst and the fly "learns" its own startup transient. Seed it from the first sample and
-    // hold learning off until the estimate has settled.
-    if (!this._primed) {
-      for (let i = 0; i < dd.length; i++) base[i] = dd[i] * danNorm[i] * g;
-      this._primed = true; this._age = 0; dd.fill(0); return 0;
-    }
-    this._age += dtMs;
+    for (let i = 0; i < dd.length; i++) dd[i] = dd[i] * danNorm[i] * g;
 
+    // 2. Warm up by *averaging*, not by sampling once. Priming from the first step is wrong
+    //    twice over: at t=0 the brain has barely spiked so dopamine is near zero, and a baseline
+    //    with an 8 s time constant then needs far longer than the old 1.5 s warmup to climb to
+    //    the true level. Until it does, the fly sees a permanent 250%+ "burst" and learns its own
+    //    startup. So collect the mean over the warmup window and start both references there.
+    this._age += dtMs;
+    if (this._age <= this.p.warmupMs) {
+      if (this._age > this.p.warmStartMs) { this._warmSum += pop; this._warmN++; }
+      else { dd.fill(0); return 0; }
+      for (let i = 0; i < dd.length; i++) base[i] += dd[i];   // per-compartment sum, averaged below
+      dd.fill(0);
+      return 0;
+    }
+    if (!this._primed) {
+      const inv = this._warmN ? 1 / this._warmN : 0;
+      for (let i = 0; i < base.length; i++) base[i] *= inv;
+      this._popFast = this._popBase = this._warmSum * inv;
+      this._primed = true;
+      dd.fill(0);
+      return 0;
+    }
+
+    // 3. Is something bad happening? Answered at population level, where the measurement is
+    //    reliable: summed over 334 DANs the trace is 30.3 (27.1-34.6) at rest and 50.9
+    //    (42.7-56.7) on a hot floor -- +68%, distributions not overlapping. Per compartment it
+    //    is not reliable (median 5 DAN edges, so far noisier), which is why the global question
+    //    and the local one are separated.
+    //    Two time constants: `trace` decays in 30 ms, so the instantaneous sum swings wildly on
+    //    spike timing alone. Dopamine acts over hundreds of ms, so smooth to ~300 ms and compare
+    //    that against a much slower tonic reference.
+    const kf = Math.min(1, dtMs / this.p.popFastMs), ks = Math.min(1, dtMs / this.p.popBaseMs);
+    this._popFast += (pop - this._popFast) * kf;
+    this._popBase += (this._popFast - this._popBase) * ks;
+    const popRel = this._popBase > 1e-5 ? (this._popFast - this._popBase) / this._popBase : 0;
+    this.stats.popRel = popRel;
+
+    let gate = (popRel - this.p.phasicFloor) * this.p.phasicGain;
+    if (gate > 1) gate = 1;
+    this.stats.gate = gate > 0 ? gate : 0;
+
+    // 4. Per-compartment baselines keep tracking regardless, so they stay valid when the gate
+    //    does open. Only the weighting is gated.
     let any = 0;
     for (let i = 0; i < dd.length; i++) {
-      const level = dd[i] * danNorm[i] * g;
-      base[i] += (level - base[i]) * kb;                  // slow tonic estimate
-      const phasic = (level - base[i]) * pg;              // only bursts teach
-      const v = phasic > 1 ? 1 : phasic;
-      dd[i] = v > 0 ? v : 0;
-      if (dd[i] > 0) any = 1;
+      const level = dd[i];
+      base[i] += (level - base[i]) * kb;
+      const rel = base[i] > 1e-5 ? (level - base[i]) / base[i] : 0;
+      const v = (gate > 0 && rel > 0) ? gate * (rel > 1 ? 1 : rel) : 0;
+      dd[i] = v;
+      if (v > 0) any = 1;
     }
-    if (this._age < this.p.warmupMs) { dd.fill(0); return 0; }
     return any;
   }
 
@@ -186,16 +236,23 @@ export class MushroomBody {
     const trace = this.brain.trace;
     if (!trace) return;
 
-    // Instrumentation: how much the two populations are driving right now.
+    // Instrumentation. mbonDrive is the readout that matters for showing a memory: it is the
+    // mushroom body's *output*, so if learning has depressed the KC->MBON synapses an odour
+    // recruits, presenting that odour again should drive the MBONs less than it used to.
     let kcT = 0; for (let r = 0; r < kcRow.length; r++) kcT += trace[kcRow[r]];
     let danT = 0; for (let d = 0; d < danRow.length; d++) danT += trace[danRow[d]];
-    this.stats.kcDrive = kcT; this.stats.danDrive = danT;
+    const mb = this.ix.mbonIds;
+    let mbT = 0; for (let i = 0; i < mb.length; i++) mbT += trace[mb[i]];
+    this.stats.kcDrive = kcT; this.stats.danDrive = danT; this.stats.mbonDrive = mbT;
 
     // --- learning: coincidence of KC eligibility trace and compartment dopamine depresses the
     // synapse. Depression (not potentiation) is the established direction at KC->MBON in flies:
     // an odour that predicted punishment stops driving the MBONs that would approach it.
-    const phasic = this.learn ? this._dopamine(dtMs) : 0;   // always run: the baseline must keep tracking
-    if (phasic) {
+    const phasic = this._dopamine(dtMs);   // always run: the baseline must keep tracking
+    let pk = 0; for (let i = 0; i < this.danDrive.length; i++) if (this.danDrive[i] > pk) pk = this.danDrive[i];
+    this.stats.phasicMax = pk;
+    this.stats.phasicPeak = Math.max(this.stats.phasicPeak || 0, pk);
+    if (this.learn && phasic) {
       const { kcRow, rowPtr, edgeMbon } = this.ix, dd = this.danDrive, dep = this.depress;
       const rate = this.p.eta * dtMs;
       for (let r = 0; r < kcRow.length; r++) {
