@@ -38,6 +38,9 @@ const FLY_CAP = Math.min(FLY_LIMIT, MAX_FLIES, Math.max(1, Number(new URLSearchP
 // chemical synapses -- they are simply never driven by light, so the fly navigates by smell,
 // taste and touch alone. This is a behavioural change, not just an optimisation.
 const NO_VISION = new URLSearchParams(location.search).get('vision') === '0';
+// Mushroom-body plasticity. On by default; ?learn=0 gives a fixed-weight brain, which is what you
+// want for a controlled behavioural comparison or a benchmark.
+const LEARN = new URLSearchParams(location.search).get('learn') !== '0';
 // Arena look. 'circus' is a big-top: black/white checker floor, red/yellow tent stripes,
 // bunting, saturated props. 'lab' is the original muted tan/grey. ?theme=lab to switch back.
 // This is NOT purely cosmetic: the floor and wall albedos in FlyAgent.albedo() are kept in
@@ -400,7 +403,7 @@ async function addFly(pos, yaw, sex = 'm') {
   scene.add(f.group); flies.push(f); batches.add(f); stackAddFly(id);
   worker.onmessage = e => onWorker(f, e.data);
   worker.postMessage({ type: 'init', id, graph: shared, meta, bodymap, flyXML, gait, env, pos, yaw, nProxies: MAX_FLIES - 1, mode: $('#mode').value, brainOpts: brainParams, neuromod: neuromodCalib, vision: !NO_VISION, sex, look: LOOK.albedo,
-    brainMem: { memory: brainMem.memory, graph: brainMem.graph, bases: brainMem.bases, opts: brainMem.opts, fv: brainMem.fv }, wasmModule, slot: id, flyvisMap, mushroom });
+    brainMem: { memory: brainMem.memory, graph: brainMem.graph, bases: brainMem.bases, opts: brainMem.opts, fv: brainMem.fv }, wasmModule, slot: id, flyvisMap, mushroom, learn: LEARN });
   await new Promise(res => { f.onReady = res; });
   if (running) worker.postMessage({ type: 'run' });
   worker.postMessage({ type: 'speed', speed });

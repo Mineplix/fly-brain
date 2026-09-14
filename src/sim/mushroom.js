@@ -58,31 +58,122 @@ export function buildMushroomIndex(data, memory, graph) {
   }
 
   const sab = (Ctor, arr) => { const a = new Ctor(new SharedArrayBuffer(arr.length * Ctor.BYTES_PER_ELEMENT)); a.set(arr); return a; };
-  const danIds = []; for (let i = 0; i < N; i++) if (isDAN[i]) danIds.push(i);
   const mbonIds = []; for (let i = 0; i < N; i++) if (isMBON[i]) mbonIds.push(i);
+
+  // Compartments, derived from connectivity rather than from type names. In the fly, a DAN
+  // modulates the KC->MBON synapses of the compartment it innervates; here "same compartment"
+  // is simply "this DAN synapses onto this MBON". That covers 96 of 97 MBONs and 334 of 340
+  // DANs, with a median of 5 DAN edges per MBON -- dense enough to gate learning per MBON.
+  // Name parsing was the alternative and would not have worked: the types are opaque
+  // ("MBON01", "PPL202") with no compartment in the string.
+  const mbonLocal = new Int32Array(N).fill(-1);
+  mbonIds.forEach((id, k) => { mbonLocal[id] = k; });
+
+  const danRow = [], danPtr = [0], danTarget = [], danW = [];
+  for (let pre = 0; pre < N; pre++) {
+    if (!isDAN[pre]) continue;
+    const a = gIndptr[pre], b = gIndptr[pre + 1];
+    let n = 0;
+    for (let k = a; k < b; k++) {
+      const m = mbonLocal[gIndices[k]];
+      if (m < 0 || gWeights[k] === 0) continue;
+      danTarget.push(m); danW.push(gWeights[k]); n++;
+    }
+    if (n) { danRow.push(pre); danPtr.push(danTarget.length); }
+  }
+  // Per-MBON normaliser so a densely innervated MBON is not simply learned faster than a sparse one.
+  const danNorm = new Float32Array(mbonIds.length);
+  for (let k = 0; k < danTarget.length; k++) danNorm[danTarget[k]] += danW[k];
+  for (let i = 0; i < danNorm.length; i++) danNorm[i] = danNorm[i] > 0 ? 1 / danNorm[i] : 0;
+
+  // Which MBON (local index) each plastic edge lands on, so the rule can look up its dopamine.
+  const edgeMbon = new Uint32Array(target.length);
+  for (let k = 0; k < target.length; k++) edgeMbon[k] = mbonLocal[target[k]];
 
   return {
     nKC: kcRow.length,
     nEdges: target.length,
+    nMBON: mbonIds.length,
     kcRow: sab(Uint32Array, kcRow),
     rowPtr: sab(Uint32Array, rowPtr),
     target: sab(Uint32Array, target),
     baseW: sab(Float32Array, baseW),
     sign: sab(Float32Array, kcRow.map(i => gSign[i])),
-    danIds: sab(Uint32Array, danIds),
+    edgeMbon: sab(Uint32Array, edgeMbon),
     mbonIds: sab(Uint32Array, mbonIds),
+    danRow: sab(Uint32Array, danRow),
+    danPtr: sab(Uint32Array, danPtr),
+    danTarget: sab(Uint32Array, danTarget),
+    danW: sab(Float32Array, danW),
+    danNorm: sab(Float32Array, danNorm),
   };
 }
 
+export const MB_DEFAULTS = {
+  eta: 0.0016,       // depression per ms at full KC trace and a full phasic dopamine burst
+  danGain: 2.5,      // scales normalised dopamine into 0..1
+  phasicGain: 6,     // amplifies the above-baseline component (bursts are small next to tone)
+  baseTauMs: 4000,   // how fast each compartment's dopamine baseline follows the tonic level
+  recoverMs: 120000, // forgetting time constant, in simulated ms (~2 simulated minutes)
+  kcEps: 1e-3,       // KC coding is sparse; skip rows below this trace
+  danEps: 1e-3,
+  warmupMs: 1500,   // let the dopamine baseline settle before anything is allowed to learn
+};
+
 /** Per-fly plastic state over the KC -> MBON slice. One of these per FlyAgent. */
 export class MushroomBody {
-  constructor(index, brain) {
+  constructor(index, brain, params = {}) {
     this.ix = index; this.brain = brain;
+    this.p = { ...MB_DEFAULTS, ...params };
+    this.learn = params.learn !== false;
     // Depression fraction per edge, 0 = naive (full connectome weight), 1 = fully suppressed.
     this.depress = new Float32Array(index.nEdges);
+    this.danDrive = new Float32Array(index.nMBON);   // phasic dopamine per compartment, recomputed each step
+    this.danBase = new Float32Array(index.nMBON);    // slow tonic baseline it is measured against
     this.dirty = false;                  // set once anything is actually learned
-    this.stats = { kcDrive: 0, danDrive: 0, edges: index.nEdges, depressed: 0, meanDepress: 0 };
-    this._acc = 0;
+    this.stats = { kcDrive: 0, danDrive: 0, edges: index.nEdges, depressed: 0, meanDepress: 0, maxDepress: 0 };
+    this._acc = 0; this._sinceHouse = 0; this._primed = false; this._age = 0;
+  }
+
+  /**
+   * Phasic dopamine per compartment.
+   *
+   * These DANs are *tonically* active -- a summed trace around 39 across 334 neurons even with
+   * nothing happening. Learning from the absolute level therefore depresses every synapse any
+   * active KC touches, which saturated ~2,700 edges within one simulated second and is decay,
+   * not learning. Real reinforcement is a burst *above* the ongoing rate, so each compartment
+   * keeps a slow baseline and only the positive deviation teaches.
+   */
+  _dopamine(dtMs) {
+    const { danRow, danPtr, danTarget, danW, danNorm } = this.ix;
+    const trace = this.brain.trace, dd = this.danDrive, base = this.danBase;
+    const g = this.p.danGain, pg = this.p.phasicGain, kb = Math.min(1, dtMs / this.p.baseTauMs);
+    dd.fill(0);
+    for (let r = 0; r < danRow.length; r++) {
+      const tr = trace[danRow[r]];
+      if (tr < this.p.danEps) continue;
+      for (let k = danPtr[r]; k < danPtr[r + 1]; k++) dd[danTarget[k]] += tr * danW[k];
+    }
+    // The baseline starts at zero, so without priming the first seconds read as one enormous
+    // burst and the fly "learns" its own startup transient. Seed it from the first sample and
+    // hold learning off until the estimate has settled.
+    if (!this._primed) {
+      for (let i = 0; i < dd.length; i++) base[i] = dd[i] * danNorm[i] * g;
+      this._primed = true; this._age = 0; dd.fill(0); return 0;
+    }
+    this._age += dtMs;
+
+    let any = 0;
+    for (let i = 0; i < dd.length; i++) {
+      const level = dd[i] * danNorm[i] * g;
+      base[i] += (level - base[i]) * kb;                  // slow tonic estimate
+      const phasic = (level - base[i]) * pg;              // only bursts teach
+      const v = phasic > 1 ? 1 : phasic;
+      dd[i] = v > 0 ? v : 0;
+      if (dd[i] > 0) any = 1;
+    }
+    if (this._age < this.p.warmupMs) { dd.fill(0); return 0; }
+    return any;
   }
 
   /**
@@ -91,17 +182,56 @@ export class MushroomBody {
    * negative correction into each MBON so the net synapse is weaker than the shared graph says.
    */
   step(dtMs = 1) {
-    const { kcRow, rowPtr, target, baseW, sign, danIds } = this.ix;
+    const { kcRow, rowPtr, target, baseW, sign, danRow } = this.ix;
     const trace = this.brain.trace;
     if (!trace) return;
 
     // Instrumentation: how much the two populations are driving right now.
     let kcT = 0; for (let r = 0; r < kcRow.length; r++) kcT += trace[kcRow[r]];
-    let danT = 0; for (let d = 0; d < danIds.length; d++) danT += trace[danIds[d]];
+    let danT = 0; for (let d = 0; d < danRow.length; d++) danT += trace[danRow[d]];
     this.stats.kcDrive = kcT; this.stats.danDrive = danT;
 
-    // Stage 1: nothing has been learned, so there is no correction to deliver. Skipping here is
-    // what makes this commit provably behaviour-neutral.
+    // --- learning: coincidence of KC eligibility trace and compartment dopamine depresses the
+    // synapse. Depression (not potentiation) is the established direction at KC->MBON in flies:
+    // an odour that predicted punishment stops driving the MBONs that would approach it.
+    const phasic = this.learn ? this._dopamine(dtMs) : 0;   // always run: the baseline must keep tracking
+    if (phasic) {
+      const { kcRow, rowPtr, edgeMbon } = this.ix, dd = this.danDrive, dep = this.depress;
+      const rate = this.p.eta * dtMs;
+      for (let r = 0; r < kcRow.length; r++) {
+        const tr = trace[kcRow[r]];
+        if (tr < this.p.kcEps) continue;          // sparse coding: most rows exit here
+        const gain = rate * tr;
+        for (let k = rowPtr[r]; k < rowPtr[r + 1]; k++) {
+          const d = dd[edgeMbon[k]];
+          if (d <= 0) continue;
+          const v = dep[k] + gain * d;
+          dep[k] = v > 1 ? 1 : v;
+          this.dirty = true;
+        }
+      }
+    }
+
+    // --- forgetting + bookkeeping, batched: a full sweep of ~29k edges every millisecond would
+    // cost more than the rest of this file put together, and the recovery constant is minutes.
+    this._sinceHouse += dtMs;
+    if (this.dirty && this._sinceHouse >= 64) {
+      const dec = Math.exp(-this._sinceHouse / this.p.recoverMs);
+      this._sinceHouse = 0;
+      const dep = this.depress;
+      let n = 0, sum = 0, mx = 0, live = 0;
+      for (let k = 0; k < dep.length; k++) {
+        const v = dep[k] * dec;
+        dep[k] = v;
+        if (v > 0.01) { n++; sum += v; if (v > mx) mx = v; live = 1; }
+      }
+      this.stats.depressed = n; this.stats.meanDepress = dep.length ? sum / dep.length : 0;
+      this.stats.maxDepress = mx;
+      if (!live) this.dirty = false;              // fully forgotten: drop back to the cheap path
+    }
+
+    // Nothing learned yet means no correction to deliver, and the fly behaves exactly as an
+    // unmodified build would. This is also the whole cost of the feature when learning is off.
     if (!this.dirty) return;
 
     // Deliver the depression as a negative conductance, proportional to how strongly each KC is
