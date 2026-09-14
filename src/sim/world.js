@@ -39,9 +39,12 @@ export function buildWorldXML(flyXML, env, { flyPos = [0, 0, 0.13], flyYaw = 0, 
     const x = (a.radius + t) * Math.cos(th), y = (a.radius + t) * Math.sin(th);
     parts.push(`<geom name="wall${k}" type="box" size="${t} ${len.toFixed(4)} ${a.wallHeight / 2}" pos="${x.toFixed(4)} ${y.toFixed(4)} ${a.wallHeight / 2}" euler="0 0 ${th.toFixed(4)}" rgba=".35 .35 .38 1" group="0" contype="2" conaffinity="2" friction="${a.wallFriction ?? 0.1}"/>`);
   }
+  // Obstacles may optionally be raised (o.z = height of the underside, default 0) and rotated
+  // about the vertical (o.yaw radians, boxes only) -- needed for spiral staircase treads.
   env.obstacles.forEach((o, k) => {
-    if (o.type === 'box') parts.push(`<geom name="obst${k}" type="box" size="${o.sx} ${o.sy} ${o.sz / 2}" pos="${o.x} ${o.y} ${o.sz / 2}" rgba=".25 .3 .25 1" group="0" contype="2" conaffinity="2" friction="${a.wallFriction ?? 0.1}"/>`);
-    else parts.push(`<geom name="obst${k}" type="cylinder" size="${o.r} ${o.sz / 2}" pos="${o.x} ${o.y} ${o.sz / 2}" rgba=".25 .3 .25 1" group="0" contype="2" conaffinity="2" friction="${a.wallFriction ?? 0.1}"/>`);
+    const zb = o.z || 0, spin = o.yaw ? ` euler="0 0 ${o.yaw.toFixed(5)}"` : '';
+    if (o.type === 'box') parts.push(`<geom name="obst${k}" type="box" size="${o.sx} ${o.sy} ${o.sz / 2}" pos="${o.x} ${o.y} ${zb + o.sz / 2}"${spin} rgba=".25 .3 .25 1" group="0" contype="2" conaffinity="2" friction="${a.wallFriction ?? 0.1}"/>`);
+    else parts.push(`<geom name="obst${k}" type="cylinder" size="${o.r} ${o.sz / 2}" pos="${o.x} ${o.y} ${zb + o.sz / 2}" rgba=".25 .3 .25 1" group="0" contype="2" conaffinity="2" friction="${a.wallFriction ?? 0.1}"/>`);
   });
   // food and patches are flat visual discs (no collision), seen by the eyes
   env.food.forEach((f, k) => parts.push(`<geom name="food${k}" type="cylinder" size="${f.r} 0.002" pos="${f.x} ${f.y} 0.002" rgba=".95 .8 .3 1" contype="0" conaffinity="0" group="0"/>`));

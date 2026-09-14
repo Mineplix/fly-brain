@@ -179,8 +179,15 @@ export class CompoundEye {
 export function clearance(p, env, others = [], z = null) {
   const [x, y] = p; let d = env.arena.radius - Math.hypot(x, y);
   for (const o of env.obstacles) {
-    if (z !== null && z > o.sz + 0.05) continue;
-    if (o.type === 'box') { const qx = Math.abs(x - o.x) - o.sx, qy = Math.abs(y - o.y) - o.sy; d = Math.min(d, Math.hypot(Math.max(qx, 0), Math.max(qy, 0)) + Math.min(Math.max(qx, qy), 0)); }
+    // o.z raises the underside (staircase treads); a raised tread is only in the way over its
+    // own height band, so a fly can pass beneath one and above the step below it.
+    const zb = o.z || 0;
+    if (z !== null && (z > zb + o.sz + 0.05 || z < zb - 0.05)) continue;
+    if (o.type === 'box') {
+      let dx = x - o.x, dy = y - o.y;
+      if (o.yaw) { const c = Math.cos(-o.yaw), s = Math.sin(-o.yaw), rx = c * dx - s * dy; dy = s * dx + c * dy; dx = rx; }   // into the box's own frame
+      const qx = Math.abs(dx) - o.sx, qy = Math.abs(dy) - o.sy; d = Math.min(d, Math.hypot(Math.max(qx, 0), Math.max(qy, 0)) + Math.min(Math.max(qx, qy), 0));
+    }
     else d = Math.min(d, Math.hypot(x - o.x, y - o.y) - o.r);
   }
   for (const f of others) if (z === null || Math.abs(z - (f.z ?? 0.13)) < 0.15) d = Math.min(d, Math.hypot(x - f.x, y - f.y) - 0.1);

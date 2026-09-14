@@ -41,13 +41,30 @@ const LOOK = {
   circus: { floorA: '#12121a', floorB: '#f0ede4', wallA: '#e02128', wallB: '#f6c624',
             prop: ['#21c8e4', '#ff4fa3', '#9ae62c', '#ff8a2b', '#a45cff', '#2bd9b0'],
             bunting: ['#21c8e4', '#ff4fa3', '#f6c624', '#9ae62c'], food: '#ffd84d', sky: '#1a0f1e',
+            tent: true, stair: { x: -1.3, y: -1.3, color: '#e02128', pole: '#8e1118' },
             // relative luminance of the four surfaces above, handed to the flies' albedo()
             albedo: { floorLo: 0.06, floorHi: 0.92, wallLo: 0.29, wallHi: 0.77 } },
   lab:    { floorA: '#6f6554', floorB: '#9c907a', wallA: '#2a2a2e', wallB: '#c9c9cf',
             prop: ['#3d4a3d'], bunting: null, food: '#f2c14e', sky: '#0b0e14',
+            tent: false, stair: null,
             albedo: { floorLo: 0.35, floorHi: 0.60, wallLo: 0.15, wallHi: 0.75 } },
 }[THEME];
 const env = PRESET.env();
+// The staircase is a real obstacle, not scenery. Pushing its treads into env.obstacles means
+// world.js builds collision geoms, clearance() senses them, and the eye rays hit them -- all
+// from one definition, because env is what gets sent to every worker.
+if (LOOK.stair) env.obstacles.push(...spiralStaircase(LOOK.stair));
+/** 16 raised, rotated treads around a newel post: 30 degrees and 0.062 cm per step (~1.33 turns, ~1 cm tall). */
+function spiralStaircase({ x, y, color, pole }) {
+  const N = 16, rise = 0.062, turn = Math.PI / 6, rHelix = 0.34, out = [];
+  for (let k = 0; k < N; k++) {
+    const th = k * turn;
+    out.push({ type: 'box', x: x + rHelix * Math.cos(th), y: y + rHelix * Math.sin(th), z: k * rise,
+      sx: 0.22, sy: 0.055, sz: 0.03, yaw: th, color });   // sx runs radially outward from the post
+  }
+  out.push({ type: 'cylinder', x, y, r: 0.06, sz: (N - 1) * rise + 0.08, color: pole });
+  return out;
+}
 const flies = [];          // {id, worker, group, bodies[], last, color, ready}
 let flyvisMap, shared, meta, bodymap, flyXML, gait, visual, batches, outputPass, running = false, selected = 0, tool = 'none', speed = 2, brainMem, wasmModule, brainParams, neuromodCalib;
 
@@ -182,8 +199,10 @@ function rebuildEnv() {
   const wall = new THREE.Mesh(new THREE.CylinderGeometry(R + 0.05, R + 0.05, env.arena.wallHeight, 96, 1, true), new THREE.MeshStandardMaterial({ map: wt, side: THREE.BackSide, roughness: 0.9 }));
   wall.rotation.x = Math.PI / 2; wall.position.z = env.arena.wallHeight / 2; envGroup.add(wall);
   if (LOOK.bunting) addBunting(R, env.arena.wallHeight);
-  for (const [i, o] of env.obstacles.entries()) { const m = new THREE.Mesh(o.type === 'box' ? new THREE.BoxGeometry(o.sx * 2, o.sy * 2, o.sz) : new THREE.CylinderGeometry(o.r, o.r, o.sz, 32), new THREE.MeshStandardMaterial({ color: LOOK.prop[i % LOOK.prop.length], roughness: 0.45, metalness: 0.05 }));
-    if (o.type !== 'box') m.rotation.x = Math.PI / 2; m.position.set(o.x, o.y, o.sz / 2); m.castShadow = m.receiveShadow = true; envGroup.add(m); }
+  if (LOOK.tent) addTentCeiling(R, env.arena.wallHeight);
+  for (const [i, o] of env.obstacles.entries()) { const m = new THREE.Mesh(o.type === 'box' ? new THREE.BoxGeometry(o.sx * 2, o.sy * 2, o.sz) : new THREE.CylinderGeometry(o.r, o.r, o.sz, 32), new THREE.MeshStandardMaterial({ color: o.color || LOOK.prop[i % LOOK.prop.length], roughness: 0.45, metalness: 0.05 }));
+    if (o.type !== 'box') m.rotation.x = Math.PI / 2; else if (o.yaw) m.rotation.z = o.yaw;
+    m.position.set(o.x, o.y, (o.z || 0) + o.sz / 2); m.castShadow = m.receiveShadow = true; envGroup.add(m); }
   for (const f of env.food) { const m = discMesh(f.r, LOOK.food, 0.35 + 0.65 * Math.min(1, f.amount / 5)); m.position.set(f.x, f.y, 0.002); m.userData.food = f; envGroup.add(m); }
   for (const b of env.bitterPatches) { const m = discMesh(b.r, '#4f8fd6', 0.9); m.position.set(b.x, b.y, 0.002); envGroup.add(m); }
   for (const h of env.hazards) { const m = discMesh(h.r, '#d9502f', 0.9); m.position.set(h.x, h.y, 0.002); envGroup.add(m); const glow = discMesh(h.r + 0.4, '#d9502f', 0.12, 0.001); glow.position.set(h.x, h.y, 0.001); envGroup.add(glow); }
@@ -210,6 +229,22 @@ function addBunting(R, wallHeight) {
   const m = new THREE.Mesh(new THREE.CylinderGeometry(R + 0.03, R + 0.03, band, 96, 1, true),
     new THREE.MeshStandardMaterial({ map: t, side: THREE.BackSide, transparent: true, alphaTest: 0.5, roughness: 0.75 }));
   m.rotation.x = Math.PI / 2; m.position.z = wallHeight - band / 2 - 0.02; envGroup.add(m);
+}
+// Big-top canopy: an open cone sitting on the wall top, striped with the same 24-wedge texture
+// as the wall so the panels line up. Purely visual -- flight cruises at 0.35-0.75 cm (FLIGHT.alt)
+// against a 1.2 cm wall, so nothing ever reaches it and it needs no collision geom. It must not
+// cast shadows either, or it would black out the arena it is lighting.
+function addTentCeiling(R, wallHeight) {
+  const rise = R * 0.72;
+  const c = document.createElement('canvas'); c.width = 1024; c.height = 8; const g = c.getContext('2d');
+  for (let k = 0; k < 24; k++) { g.fillStyle = (k & 1) ? LOOK.wallB : LOOK.wallA; g.fillRect(k * 1024 / 24, 0, 1024 / 24 + 1, 8); }
+  const t = new THREE.CanvasTexture(c); t.colorSpace = THREE.SRGBColorSpace;
+  const cone = new THREE.Mesh(new THREE.ConeGeometry(R + 0.05, rise, 96, 1, true),
+    new THREE.MeshStandardMaterial({ map: t, side: THREE.BackSide, roughness: 0.95 }));
+  cone.rotation.x = Math.PI / 2;                  // three's cone is +Y up; this scene is Z-up
+  cone.position.z = wallHeight + rise / 2;
+  cone.castShadow = false; cone.receiveShadow = false;
+  envGroup.add(cone);
 }
 function buildFlyMesh(color, sex) {
   const appearance = visual.instantiate(sex);
