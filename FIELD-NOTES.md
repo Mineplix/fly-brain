@@ -1776,3 +1776,70 @@ So `sleep 600` in a shell is the *worst* way to wait for a browser run: the pane
 backgrounds and the workers throttle. Polling the page every ~35 s keeps it
 awake and is dramatically faster in wall time. Several "this is taking forever"
 stretches this session were this, not the simulation.
+
+---
+
+## 25. Defensive arousal — a null result, and why the design was wrong
+
+Can a fly feel anything? Not answerable. Anderson and Adolphs (2014) propose
+testing measurable properties instead -- valence, persistence, scalability,
+generalisation -- and Gibson et al. (2015) showed Drosophila have a defensive
+arousal after repeated looming that outlasts the stimulus, scales with sweeps,
+raises locomotion and suppresses feeding.
+
+`public/arousal.js` (`?arousal=1`) runs that paradigm. It needs no dopamine
+teaching signal, so it was askable while conditioning was still blocked.
+
+### First, a bug that would have invalidated everything
+
+`launchThreat()` animates on WALL-CLOCK time -- a ~350 ms swoop. At 0.037x that
+is **13 ms of the fly's own time**: not a looming stimulus, barely a flicker.
+The monster has the same property. The harness now steps the object toward the
+head over a fixed span of SIMULATED milliseconds, quadratically, so angular size
+accelerates toward contact the way a real approach does.
+
+> Anything timed for the fly must be expressed in simulated time. Wall-clock
+> animation is for the viewer.
+
+### The result
+
+    condition   base speed    post +2s   post +4s   (relative to own baseline)
+    0 passes    0.422 cm/s      1.45       1.23
+    2 passes    0.737 cm/s      0.83       1.93
+    6 passes    1.495 cm/s      0.50       0.84
+
+No persistence, no dose-response. The CONTROL shows the largest immediate
+elevation and six passes shows a decrease.
+
+### Why it is uninterpretable, not merely negative
+
+The baselines: **0.422 -> 0.737 -> 1.495 cm/s**, a 3.5x range, rising
+monotonically in exactly the order the conditions ran.
+
+1. **Order confounded with time.** Conditions ran 0, 2, 6 ascending on one fly,
+   no washout, no counterbalancing. Normalising to each condition's own baseline
+   does not rescue it -- dividing by a climbing baseline manufactures a falling
+   trend.
+2. **Underpowered.** n = 1, and the unpunished control alone swings 1.45x
+   spontaneously. Any real effect must clear that.
+3. **Windows too short.** Walking and feeding are bouty; 2 s bins sample bout
+   phase more than state.
+
+> ⚠️ The 0-pass control is the only reason this was caught. Without it a 1.45x
+> post-stimulus elevation reads as textbook defensive arousal. Every one of these
+> behavioural measures needs a no-stimulus control run in the same session.
+
+### A hypothesis, not a result
+
+Baseline activity rising monotonically across conditions is what carryover
+arousal would look like -- each condition starting more aroused from the previous
+one's looms. It is equally explicable as energy drift. This design cannot
+separate them, which is an argument for washout and randomised order rather than
+a finding.
+
+### What a real version needs
+
+- randomised or counterbalanced condition order
+- several independent flies (separate workers = different brain seeds)
+- washout between conditions, checked by return to a common baseline
+- longer windows, sized against the bout structure rather than convenience

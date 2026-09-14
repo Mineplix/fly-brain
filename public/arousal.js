@@ -92,8 +92,35 @@ async function measure(dt) {
   };
 }
 
-/** One looming pass, through the same channel a real predator would use. */
-function loom() { A.launchThreat?.(); }
+/**
+ * One looming pass, expressed in SIMULATED time.
+ *
+ * A.launchThreat() cannot be used here: its swoop is animated on wall-clock time (~350 ms), and
+ * with the simulation running at ~0.037x that is 13 ms of the fly's own time -- far too brief to
+ * be a looming stimulus at all. What matters is the angular expansion the fly experiences, so
+ * the object is stepped toward its head over a fixed span of simulated milliseconds instead.
+ *
+ * Approach is quadratic, which is what makes it loom rather than merely approach: angular size
+ * accelerates toward contact, and that expansion is the cue the giant-fibre pathway detects
+ * (von Reyn et al. 2014).
+ */
+async function loom({ ms = 250, from = 3.0, to = 0.35 } = {}) {
+  const s0 = fly()?.last; if (!s0) return false;
+  const p = s0.pos, yaw = s0.yaw, a = yaw + 0.5;
+  const t0 = simS(), dur = ms / 1000, w0 = performance.now();
+  while (true) {
+    const u = (simS() - t0) / dur;
+    if (u >= 1 || dead() || performance.now() - w0 > 120000) break;
+    const k = u * u;                                   // accelerating approach
+    const r = from + (to - from) * k;
+    A.env.threat = { x: p[0] + r * Math.cos(a), y: p[1] + r * Math.sin(a), z: 0.45 + (1.6 - 0.45) * (1 - k) };
+    for (const f of A.flies) if (f.ready) f.worker.postMessage({ type: 'env', env: { threat: A.env.threat } });
+    await sleep(60);
+  }
+  A.env.threat = null;
+  for (const f of A.flies) if (f.ready) f.worker.postMessage({ type: 'env', env: { threat: null } });
+  return !dead();
+}
 
 async function condition(passes) {
   say('');
@@ -111,7 +138,10 @@ async function condition(passes) {
   if (dead()) { say('  fly died during baseline -- discarded'); return null; }
 
   // threat period
-  for (let k = 0; k < passes; k++) { loom(); if (!await advance(1.0)) return null; }
+  for (let k = 0; k < passes; k++) {
+    if (!await loom()) return null;
+    if (!await advance(0.45)) return null;            // inter-pass gap, in simulated time
+  }
   if (passes === 0) { if (!await advance(1.0)) return null; }
 
   // post period, binned so any decay is visible rather than averaged away
