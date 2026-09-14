@@ -42,6 +42,35 @@ export class Senses {
     this.songPhase = 0;   // pulse-train phase for courtship song (see SONG)
   }
   /** called once the brain metadata is available: map taste types to neuron indices per location */
+  /**
+   * Nociceptive afferents onto the PPL1 dopaminergic cluster.
+   *
+   * WHY THIS IS ADDED RATHER THAN DERIVED. The graph has 25 thermosensory neurons -- the arista
+   * cells, which report preferred temperature (Gallio et al. 2011). They are not nociceptors.
+   * Noxious heat and mechanical nociception in Drosophila are carried by class IV multidendritic
+   * neurons, which are peripheral and therefore almost entirely outside a central-brain EM
+   * volume. The afferents that would carry "this hurts" to PPL1 are missing from the dataset,
+   * not weakly connected in it.
+   *
+   * Measured consequence: a hot floor raises the summed PPL trace by ~11% (27.1 -> 30.2 global,
+   * 11.09 -> 12.24 PPL), where the phasic gate needs ~68%. The 25 arista cells, already driven at
+   * 100 Hz, reach PPL only over 103 two-hop paths through 46 intermediates -- a real route, but
+   * far too thin to move a population the rule can detect.
+   *
+   * This supplies the missing afferent, in the same spirit as the giant-fibre -> TTMn electrical
+   * synapse that world/motor already add explicitly because a chemical connectome cannot contain
+   * it. It is a sensory channel, not a circuit being puppeted: noxious intensity in, firing rate
+   * onto the neurons those afferents are known to target, and the network does the rest.
+   *
+   * It is OFF by default. It is an addition beyond the connectome and every result that depends
+   * on it has to say so.
+   */
+  bindNociceptors(typeOf) {
+    this.ppl = [];
+    for (let i = 0; i < typeOf.length; i++) if ((typeOf[i] || '').startsWith('PPL')) this.ppl.push(i);
+    return this.ppl.length;
+  }
+
   bindTypes(typeOf, sideOf, nerveLegOf) {
     this.taste = { labellum: {}, peg: {}, legs: {} };
     const N = typeOf.length;
@@ -146,6 +175,16 @@ export class Senses {
     // temperature: hot floor patches heat the fly (thermosensory neurons of the arista)
     st.heat = heatAt(st.pos, env);
     for (const sd of ['left', 'right']) { const h = heatAt(st.antenna[sd], env); if (h > 0.05) this.set(this.S[`thermosensory ${sd}`] || [], 200 * h); }
+    // nociception -> PPL1 (off unless the host enabled it; see bindNociceptors)
+    if (this.ppl && this.ppl.length) {
+      const noxHeat = st.heat > NOCI.floor ? Senses.hill(st.heat, NOCI.heatK, 2.0) * NOCI.hz : 0;
+      // bitter under the body, sampled the same way the tarsal receptors sample it
+      let bit = 0;
+      for (const b of env.bitterPatches) if (Math.hypot(st.pos[0] - b.x, st.pos[1] - b.y) < b.r) bit = Math.max(bit, b.bitter);
+      const noxBitter = bit > NOCI.floor ? Senses.hill(bit, NOCI.bitterK, 2.0) * NOCI.bitterHz : 0;
+      const nox = Math.max(noxHeat, noxBitter);
+      if (nox > 0) this.set(this.ppl, nox);
+    }
     // humidity: the 65 hygrosensory neurons sit in the antenna next to the thermosensory ones and
     // were never driven. The bodymap pools moist and dry cells into one group per side, so only
     // the moist response is modelled, and it is driven by the rise *above ambient* rather than by
@@ -251,6 +290,12 @@ export function humidityAt(p, env) {
   if (w > 0) h = base + (h - base) / (1 + HUMID.windMix * w);          // wind mixes the excess out
   return h < 0 ? 0 : h > 1 ? 1 : h;
 }
+
+// Nociception. `heatK` is the half-maximal noxious intensity and `hz` the saturating rate onto
+// PPL1; `bitter` weights a noxious tastant against noxious heat. Values are chosen so that heat
+// 0.5 -- the damage threshold, and the only punishment level safe to leave on -- produces a
+// clear phasic rise without pinning the population, NOT fitted to physiology.
+export const NOCI = { heatK: 0.22, hz: 130, bitterK: 0.35, bitterHz: 90, floor: 0.06 };
 
 export function heatAt(p, env) {
   let heat = 0; for (const h of env.hazards) { const d = Math.hypot(p[0] - h.x, p[1] - h.y); heat = Math.max(heat, h.heat * Math.max(0, 1 - Math.max(0, d - h.r) / 0.4)); }

@@ -15,7 +15,7 @@ import { createBrain } from '../brainmodel.js';
 const Rt9 = (xm, b) => [xm[b * 9], xm[b * 9 + 3], xm[b * 9 + 6]];   // body x axis (heading) in world frame
 
 export class FlyAgent {
-  constructor({ mj, flyXML, env, data, size, sign, bodymap, gait, id = 0, pos = [0, 0], yaw = 0, nProxies = 0, mode = 'descending', brainOpts = {}, vision = true, brain = null, flyvis = null, intrinsic = true, seed = 0, neuromod = null, sex = 'm', look = null, mushroom = null, learn = true, etaMul = 1, mbParams = null }) {
+  constructor({ mj, flyXML, env, data, size, sign, bodymap, gait, id = 0, pos = [0, 0], yaw = 0, nProxies = 0, mode = 'descending', brainOpts = {}, vision = true, brain = null, flyvis = null, intrinsic = true, seed = 0, neuromod = null, sex = 'm', look = null, mushroom = null, learn = true, etaMul = 1, mbParams = null, noci = false }) {
     this.id = id; this.mj = mj; this.env = env; this.data = data; this.vision = vision; this.sex = sex;
     // Reflectance of the checker floor and striped wall, matching whatever the host is drawing.
     // Defaults are the original muted arena; the circus theme is far higher contrast.
@@ -42,6 +42,7 @@ export class FlyAgent {
     this.neuromod = brainOpts.neuromod ? new Neuromod(data, this.brain, { calib: neuromod?.calib, block: neuromod?.block, params: neuromod?.params, minSyn: brainOpts.minSyn ?? 5 }) : null;
     const typeOf = data.meta.types, sideOf = data.side;
     this.senses = new Senses(bodymap, mj, M); this.senses.bindTypes(typeOf, sideOf);
+    if (noci) { const n = this.senses.bindNociceptors(typeOf); if (this.id === 0) console.info(`nociceptive afferents enabled: ${n} PPL neurons`); }
     // LC10 small-object visual projection neurons: the eye-to-courtship channel. A nearby fly is detected
     // visually (LC10 responds to small moving objects; LC10a -> pC1/pIP10, Ribeiro et al. 2018), which is
     // how a male starts courting before the cVA pheromone plume reaches him
