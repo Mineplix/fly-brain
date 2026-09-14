@@ -88,12 +88,17 @@ fallback for static hosts that can't set headers (e.g. GitHub Pages).
 > reports `NVIDIA GeForce RTX 4050` and **both** the default and high-performance WebGPU
 > adapters return `nvidia`.
 >
-> Measured in real Chrome, one fly:
+> Measured in real Chrome on the RTX 4050, one fly:
 >
 > | backend | sim-sec per wall-sec | |
 > |---|---:|---|
-> | WASM (`?gpu=0`) | 0.0148 | baseline |
-> | **WebGPU on the RTX 4050** | **0.19** | **~13× faster** |
+> | WASM (`?gpu=0`) | 0.0148 | baseline, rendering off |
+> | **WebGPU on the RTX 4050** | **0.0650** | **≥4.4× faster, rendering on at 165 fps** |
+>
+> ⚠️ An interim version of this note claimed **0.19×** and "13× faster" from a verbally
+> reported reading. That number **could not be reproduced** and is withdrawn. The measured
+> figure is 0.0650×. The 4.4× is conservative: the WASM baseline had rendering disabled
+> while the WebGPU run was also driving the scene at 165 fps.
 >
 > So the defaults in `attachBrain()` are **right**, not broken. Two conclusions that
 > followed from the bad numbers are withdrawn:
@@ -109,6 +114,35 @@ fallback for static hosts that can't set headers (e.g. GitHub Pages).
 > 📌 Method lesson: check *which physical device* a benchmark is running on before drawing
 > conclusions from it. The adapter string is one line of JavaScript and would have caught
 > this at the start.
+>
+> ### ❗ The trap that cost the most time: Chrome was on the iGPU too
+>
+> Even in real Chrome, **`requestAdapter()` and `requestAdapter({powerPreference:'high-performance'})`
+> both returned `intel gen-12lp`**, and `WebGL renderer` read `Intel(R) UHD Graphics`. The
+> RTX 4050 was installed and idle.
+>
+> ⚠️ **`chrome://gpu` does not answer this.** It lists every adapter *present*, so it
+> cheerfully shows "NVIDIA GeForce RTX 4050" on a machine where Chrome is using the Intel.
+> The line that matters is **`GL_RENDERER`**, or simply the WebGPU adapter string.
+>
+> The fix is **outside the browser and outside this repo** — a Windows per-app graphics
+> preference:
+>
+> ```
+> Settings > System > Display > Graphics > Google Chrome > Options > High performance
+> ```
+> or equivalently the registry value
+> `HKCU\SOFTWARE\Microsoft\DirectX\UserGpuPreferences` →
+> `"<path>\chrome.exe" = "GpuPreference=2;"`, then a **full** Chrome restart (kill every
+> `chrome.exe`; closing the windows is not enough).
+>
+> After that, both adapters report `nvidia lovelace` and the renderer reports
+> `RTX 4050 Laptop GPU`.
+>
+> **Consequence for `lifgpu.js`: there is no bug.** Once Chrome is on the right device the
+> default and high-performance adapters agree, so the `powerPreference` patch — which I
+> suspected twice — would change nothing. Anyone benchmarking this project on a laptop
+> should check the adapter string first; every number is meaningless until it reads right.
 
 The rest of this section still holds **for the iGPU case**, which is what a machine without
 a usable discrete GPU will hit.
@@ -585,25 +619,65 @@ genuinely different. Worth re-testing before trusting any absolute number too ha
 WASM path, at the ~6-fly knee: ~0.010× real time, i.e. an 8-hour run gives **4–5 minutes of
 fly time per fly**.
 
-Real Chrome on the RTX 4050, WebGPU, one fly, is **0.19×** — 5.3 s of wall clock per
-simulated second:
+### 8.9 ✅ The WebGPU ramp on the RTX 4050
 
-| backend (1 fly) | wall per sim-second | fly-time from an 8-hour run |
-|---|---:|---:|
-| WASM | 68 s | **7 min** |
-| **WebGPU / RTX 4050** | **5.3 s** | **91 min** |
+Real Chrome, Chrome forced onto the discrete GPU, rendering **on**, machine already hot,
+`?flies=12&bench=1`. Both WebGPU adapters and the WebGL renderer confirmed `nvidia
+lovelace` / `RTX 4050 Laptop GPU` before the run.
 
-**13× more simulated time per night.** That turns the headless-recording goal from
-marginal into comfortable — and this is *before* `?vision=0`, which was worth another 3.6×
-on the WASM path (unmeasured on WebGPU).
+| flies | per fly | aggregate | fps |
+|---:|---:|---:|---:|
+| 1 | 0.0650 | 0.0650 | 165 |
+| 2 | 0.0570 | 0.1139 | 165 |
+| **3** | **0.0470** | **0.1409** | 165 |
+| 4 | 0.0287 | 0.1146 | 165 |
+| 5 | 0.0260 | 0.1300 | 165 |
+| **6** | **0.0247** | **0.1485** | **165** |
+| 7 | 0.0209 | 0.1460 | 131 |
+| 8 | 0.0181 | 0.1445 | 123 |
+| 9 | 0.0165 | 0.1486 | 107 |
+| 10 | 0.0156 | 0.1556 | 106 |
+| 11 | 0.0146 | 0.1609 | 90 |
+| 12 | 0.0102 | 0.1219 | 53 |
 
-The multi-fly ceiling on WebGPU is **unknown**. The WASM knee at ~6 flies came from CPU
-contention, most likely memory bandwidth; a GPU backend has entirely different scaling, and
-per-fly cost may stay flat much further since the connectome is read once per dispatch.
-Re-running the Phase 3 ramp on WebGPU is the single most valuable outstanding measurement.
+**Aggregate throughput saturates at ~3 flies and never exceeds ~0.16.** From 3 onwards
+per-fly falls almost exactly as 1/N — the signature of a single shared resource that is
+already fully busy. The total amount of fly-time you can produce per wall-second is
+**fixed at ~0.15 regardless of fly count**; more flies only subdivides it.
 
-📌 It cannot be done from the automation pane — that pane cannot see the discrete GPU.
-It needs real Chrome, either driven by the user or via a connected browser extension.
+❗ **This is the opposite shape to the WASM path**, which scaled cleanly to ~6 flies before
+flattening at ~0.06 aggregate. WebGPU is ~2.5× better in absolute aggregate but saturates
+*sooner*, because every fly is dispatching to the **same GPU**, and `fly.worker.js` makes
+each one `await device.queue.onSubmittedWorkDone()` every step — so the flies serialise on
+one device instead of running in parallel as they do across CPU cores.
+
+📌 **This is exactly the case for the batched GPU rewrite** described in the original brief
+— one read of the connectome and a single SpMM per timestep serving all flies, instead of
+N independent SpMVs each awaiting completion. The measurement says the per-fly GPU design
+cannot go past ~0.16 aggregate no matter how many flies you add, and that batching is the
+only thing that would move it. (Still not attempted; it is a large piece of work.)
+
+**Rendering is not the limit below 7 flies** — a flat 165 fps through 6, then decaying to
+53 by 12. So the saturation from 3→6 is GPU-compute contention, not draw cost.
+
+### 8.10 Choosing a fly count
+
+Because aggregate is fixed, an 8-hour unattended run produces roughly the same **total**
+fly-time whatever you pick — about 70 minutes. What changes is how it is divided:
+
+| flies | each fly gets | total fly-time | live fps |
+|---:|---:|---:|---:|
+| 3 | ~23 min | ~68 min | 165 |
+| 6 | ~12 min | ~71 min | 165 |
+| 11 | ~7 min | ~77 min | 90 |
+
+- **Longest continuous behaviour per fly → 3 flies.**
+- **Best balance, still perfectly smooth → 6 flies.** Highest count that holds 165 fps, and
+  aggregate is within 6% of the maximum. This is the recommended default.
+- More than 11 is counterproductive: at 12 both per-fly and aggregate drop.
+
+`?vision=0` on WebGPU is **unmeasured**. It was worth 3.6× on the WASM path; if it helps
+similarly here it would raise the aggregate ceiling, which is the number that matters.
 
 ---
 
