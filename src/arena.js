@@ -72,7 +72,7 @@ const LOOKS = {
   circus: { floorA: '#12121a', floorB: '#f0ede4', wallA: '#e02128', wallB: '#f6c624',
             prop: ['#21c8e4', '#ff4fa3', '#9ae62c', '#ff8a2b', '#a45cff', '#2bd9b0'],
             bunting: ['#21c8e4', '#ff4fa3', '#f6c624', '#9ae62c'], food: '#ffd84d', sky: '#1a0f1e',
-            tent: true, stair: { x: -1.3, y: -1.3, color: '#e02128', pole: '#8e1118' },
+            tent: true, props: true, stair: { x: -0.15, y: -0.15, color: '#e02128', pole: '#8e1118', dais: '#f6c624' },
             // relative luminance of the four surfaces above, handed to the flies' albedo()
             orb: '#ff2318', orbGlow: '#ff6a4a',
             albedo: { floorLo: 0.06, floorHi: 0.92, wallLo: 0.29, wallHi: 0.77 } },
@@ -111,17 +111,55 @@ const env = PRESET.env();
 // world.js builds collision geoms, clearance() senses them, and the eye rays hit them -- all
 // from one definition, because env is what gets sent to every worker.
 if (LOOK.stair) env.obstacles.push(...spiralStaircase(LOOK.stair));
+if (LOOK.props) env.obstacles.push(...carnivalProps(LOOK));
 /** 16 raised, rotated treads around a newel post: 30 degrees and 0.062 cm per step (~1.33 turns, ~1 cm tall). */
-function spiralStaircase({ x, y, color, pole }) {
-  const N = 16, rise = 0.062, turn = Math.PI / 6, rHelix = 0.34, out = [];
+function spiralStaircase({ x, y, color, pole, dais }) {
+  const N = 22, rise = 0.062, turn = Math.PI / 6, rHelix = 0.34, out = [];
+  // a raised dais anchors the staircase to the middle of the ring instead of leaving it
+  // floating on the floor, which is the single biggest staging difference in the reference
+  if (dais) out.push({ type: 'cylinder', x, y, r: 0.62, sz: 0.045, color: dais });
   for (let k = 0; k < N; k++) {
     const th = k * turn;
-    out.push({ type: 'box', x: x + rHelix * Math.cos(th), y: y + rHelix * Math.sin(th), z: k * rise,
+    out.push({ type: 'box', x: x + rHelix * Math.cos(th), y: y + rHelix * Math.sin(th), z: 0.045 + k * rise,
       sx: 0.22, sy: 0.055, sz: 0.03, yaw: th, color });   // sx runs radially outward from the post
   }
-  out.push({ type: 'cylinder', x, y, r: 0.06, sz: (N - 1) * rise + 0.08, color: pole });
+  out.push({ type: 'cylinder', x, y, r: 0.06, sz: (N - 1) * rise + 0.12, z: 0.045, color: pole });
   return out;
 }
+/**
+ * Carnival furniture: pedestal tables, stacked crates, a layered centrepiece and scattered
+ * blocks, at a range of heights so there is something to climb rather than one empty ring.
+ *
+ * These are REAL obstacles, not scenery. Each becomes a collision geom in every fly's MuJoCo
+ * world and is walked by clearance() on every sensory tick, so the count is a cost, not free
+ * decoration -- which is the whole reason they are worth having: the flies can climb them, bump
+ * into them, and be occluded by them.
+ */
+function carnivalProps(look) {
+  const P = look.prop, out = [];
+  const pick = i => P[i % P.length];
+  // pedestal tables: a thin pole with a disc on top, the tall furniture the flies can perch on
+  const tables = [[-1.55, 0.95, 0.52], [1.45, 1.05, 0.44], [1.75, -0.55, 0.60], [-1.15, -1.55, 0.40]];
+  tables.forEach(([x, y, h], i) => {
+    out.push({ type: 'cylinder', x, y, r: 0.045, sz: h, color: look.wallA });
+    out.push({ type: 'cylinder', x, y, r: 0.20, sz: 0.035, z: h, color: pick(i) });
+  });
+  // stacked crates, offset so they read as stacked rather than as one tall box
+  const stacks = [[0.95, -1.65], [-1.85, -0.35]];
+  stacks.forEach(([x, y], i) => {
+    out.push({ type: 'box', x, y, sx: 0.17, sy: 0.17, sz: 0.24, color: pick(i + 1) });
+    out.push({ type: 'box', x: x + 0.05, y: y - 0.04, sx: 0.12, sy: 0.12, sz: 0.18, z: 0.24, color: pick(i + 3) });
+  });
+  // layered centrepiece: three discs of falling radius, the big cake on the left of the reference
+  const cx = -1.7, cy = 1.75;
+  [[0.42, 0.10, 0], [0.31, 0.09, 0.10], [0.20, 0.08, 0.19]].forEach(([r, h, z], i) =>
+    out.push({ type: 'cylinder', x: cx, y: cy, r, sz: h, z, color: pick(i + 2) }));
+  // low scattered blocks, the loose confetti of the set
+  [[0.55, 0.95], [-0.45, -0.95], [1.15, 0.25], [-0.85, 0.35], [0.25, 1.65], [1.85, 1.65]]
+    .forEach(([x, y], i) => out.push({ type: 'box', x, y, sx: 0.10, sy: 0.10, sz: 0.13 + 0.05 * (i % 3), color: pick(i) }));
+  return out;
+}
+
 const flies = [];          // {id, worker, group, bodies[], last, color, ready}
 let mushroom = null;
 let flyvisMap, shared, meta, bodymap, flyXML, gait, visual, batches, outputPass, running = false, selected = 0, tool = 'none', speed = 2, brainMem, wasmModule, brainParams, neuromodCalib;
@@ -218,11 +256,17 @@ function buildScene(data) {
   camera.position.set(-1.2, -1.6, 1.3);
   controls = new OrbitControls(camera, renderer.domElement); controls.enableDamping = true; controls.target.set(0, 0, 0.1);
   controls.minDistance = 0.16; controls.maxDistance = env.arena.radius * 5;
-  scene.add(new THREE.HemisphereLight('#f4f2ed', '#514432', 0.22));
-  sun = new THREE.DirectionalLight('#fff1da', 2.7); sun.position.set(3, 2, 8); sun.castShadow = true;
+  // Big-top lighting is flat and bright: a carnival is lit to be legible, not dramatic. The
+  // circus theme therefore gets much stronger ambient fill so the saturated primaries read at
+  // full strength instead of sinking into shadow; 'lab' and the underground looks keep the
+  // original moody key. This is render-only -- the flies' albedos are unchanged, so brightening
+  // the set for us does NOT quietly change what the photoreceptors are handed.
+  const carnival = THEME === 'circus';
+  scene.add(new THREE.HemisphereLight('#ffffff', carnival ? '#6b6f86' : '#514432', carnival ? 0.85 : 0.22));
+  sun = new THREE.DirectionalLight(carnival ? '#ffffff' : '#fff1da', carnival ? 1.9 : 2.7); sun.position.set(3, 2, 8); sun.castShadow = true;
   sun.shadow.mapSize.set(2048, 2048); sun.shadow.bias = -0.00002; sun.shadow.normalBias = 0.0003; sun.shadow.radius = 2;
   Object.assign(sun.shadow.camera, { left: -4, right: 4, top: 4, bottom: -4, near: 0.1, far: 20 }); scene.add(sun, sun.target);
-  const rim = new THREE.DirectionalLight('#f9e5c4', 0.65); rim.position.set(-3, -2, 3); scene.add(rim);
+  const rim = new THREE.DirectionalLight(carnival ? '#ffffff' : '#f9e5c4', carnival ? 1.0 : 0.65); rim.position.set(-3, -2, 3); scene.add(rim);
   const rt = new THREE.WebGLRenderTarget(1, 1, { type: THREE.HalfFloatType, samples: 4 });
   composer = new EffectComposer(renderer, rt); composer.addPass(new RenderPass(scene, camera));
   gtao = new GTAOPass(scene, camera, 1, 1);
