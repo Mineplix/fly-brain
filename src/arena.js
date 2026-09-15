@@ -1148,17 +1148,37 @@ function renderFlyList() {
 
 // ---------------- brain panel: what the selected fly sees, and its named neuron groups ----------------
 const HIST = 150;                    // samples kept per trace (~18 s at the 120 ms poll)
-let groups = [], hist = [], histFly = -1, hover = -1, hlShown = -1, hlPts = null, eyeDots = null;
+let groups = [], hist = [], histFly = -1, hover = -1, hlShown = -1, hlPts = null, eyeDots = null, brainData = null;
 // hovered group's neurons as large points over the inset (small groups vanish among 165k somas otherwise)
 function showGroupInInset(j) {
   hlShown = j; hlPts.visible = j >= 0; if (j < 0) return;
   if (groups[j] && groups[j].plottable === 0) { hlPts.visible = false; return; }   // nothing to draw; the row says why
-  const g = groups[j], src = brainPts.geometry.attributes.position.array, pos = [];
-  for (const ix of [g.L, g.R]) for (const i of ix) if (src[i * 3] < 1e5) pos.push(src[i * 3], src[i * 3 + 1], src[i * 3 + 2]);
+  const g = groups[j];
+  // Cached: a group like Smell walks 3,044 neurons' outgoing edges to place them, and hover
+  // fires on every mouse move.
+  if (!g.hlPos) {
+    const src = brainPts.geometry.attributes.position.array, pos = [], D = brainData;
+    for (const ix of [g.L, g.R]) for (const i of ix) {
+      if (src[i * 3] < 1e5) { pos.push(src[i * 3], src[i * 3 + 1], src[i * 3 + 2]); continue; }
+      // No cell body in the volume. Draw it where its axon terminates instead: the centroid of
+      // the partners it synapses onto, which is where this input arrives in the brain.
+      if (!D) continue;
+      let x = 0, y = 0, z = 0, n = 0;
+      for (let k = D.indptr[i]; k < D.indptr[i + 1]; k++) {
+        const t = D.indices[k];
+        if (src[t * 3] >= 1e5) continue;
+        x += src[t * 3]; y += src[t * 3 + 1]; z += src[t * 3 + 2]; n++;
+      }
+      if (n) pos.push(x / n, y / n, z / n);
+    }
+    g.hlPos = pos;
+  }
+  const pos = g.hlPos;
   hlPts.geometry.dispose(); hlPts.geometry = new THREE.BufferGeometry(); hlPts.geometry.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
   hlPts.material.color.set(g.color);
 }
 function buildBrainPanel(data) {
+  brainData = data;
   groups = buildGroups(bodymap, meta.types, data.side);
   // How many of a group's neurons can actually be PLOTTED. Peripheral sensory afferents have no
   // soma coordinates at all -- their cell bodies sit in the antenna, proboscis and legs, outside
@@ -1167,18 +1187,27 @@ function buildBrainPanel(data) {
   // 0/1,733, tactile 0/2,558, unknown sensory 0/1,707, visual 28/4,107 -- against 99-100% for
   // central populations. Without this count the panel highlights nothing and looks broken.
   for (const g of groups) {
-    let n = 0;
-    for (const ix of [g.L, g.R]) for (const i of ix) if (Number.isFinite(data.soma[i * 3])) n++;
-    g.plottable = n;
+    let own = 0, viaTargets = 0;
+    for (const ix of [g.L, g.R]) for (const i of ix) {
+      if (Number.isFinite(data.soma[i * 3])) { own++; continue; }
+      // No cell body in the volume -- but its axon terminals are, so look for a postsynaptic
+      // partner that does have one. Measured: Smell 3,044/3,044 locatable this way, Taste
+      // 1,031/1,039, Photoreceptors 3,405 of the 4,079 without a soma.
+      for (let k = data.indptr[i]; k < data.indptr[i + 1]; k++) {
+        if (Number.isFinite(data.soma[data.indices[k] * 3])) { viaTargets++; break; }
+      }
+    }
+    g.ownSoma = own; g.viaTargets = viaTargets; g.plottable = own + viaTargets;
   }
   // Measured plottable fractions: Smell 0/3,044, Taste 0/1,039, Photoreceptors 28/4,107 (0.7%),
   // every other group 93-100%. A group at 0.7% technically draws, but 28 points among 165k is
   // invisible -- so the badge reports the fraction rather than only flagging exact zeros.
-  const SOMA_NOTE = 'Peripheral neurons: their cell bodies lie in the antenna, proboscis, retina or legs, outside the imaged volume, so the connectome carries no soma coordinates for them. They are simulated and driven normally — there is simply nothing to plot.';
+  const SOMA_NOTE = 'Peripheral neurons: their cell bodies lie in the antenna, proboscis, retina or legs, outside the imaged volume, so the connectome carries no soma coordinates for them. Their axon terminals ARE in the volume, so they are drawn at the mean position of the partners they synapse onto — for smell that is the antennal lobe, for taste the subesophageal zone. That is where the signal arrives in the brain, not where the cell body sits.';
   $('#groups').innerHTML = groups.map((g, j) => {
     const tot = g.L.length + g.R.length, frac = tot ? g.plottable / tot : 1;
-    const badge = g.plottable === 0 ? `<em class="nosoma" title="${SOMA_NOTE}">no soma</em>`
-      : frac < 0.2 ? `<em class="nosoma" title="${SOMA_NOTE} Only ${g.plottable} of ${tot} have one, so the highlight is nearly invisible.">${g.plottable}/${tot} plotted</em>`
+    const badge = g.ownSoma === 0 && g.viaTargets > 0 ? `<em class="nosoma" title="${SOMA_NOTE}">at terminals</em>`
+      : g.plottable === 0 ? `<em class="nosoma" title="${SOMA_NOTE}">not locatable</em>`
+      : frac < 0.2 ? `<em class="nosoma" title="${SOMA_NOTE} Only ${g.plottable} of ${tot} can be placed.">${g.plottable}/${tot} shown</em>`
       : '';
     return `<div class="g${frac < 0.2 ? ' nosoma' : ''}" data-j="${j}">
       <span class="name"><i style="background:${g.color}"></i>${g.label} <small>${tot}</small>${badge}<button class="q" title="what is this?">?</button></span>
