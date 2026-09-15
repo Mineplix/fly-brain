@@ -301,7 +301,22 @@ export function humidityAt(p, env) {
 // clear phasic rise without pinning the population, NOT fitted to physiology.
 export const NOCI = { heatK: 0.22, hz: 130, bitterK: 0.35, bitterHz: 90, floor: 0.06 };
 
+/**
+ * Floor heat at a point, INCLUDING its height.
+ *
+ * This used to ignore p[2] entirely, which meant a fly standing on a table or in mid-flight felt
+ * exactly what a fly on the floor felt. Climbing and flying were therefore not escape routes from
+ * a hot floor -- they were no-ops. Heat here is conducted and radiated from the substrate, so it
+ * falls away above it: a standing fly's tarsi are at z ~ 0, its thorax at 0.13, a tabletop is at
+ * 0.4-0.6, and flight is higher still. HEAT_Z sets the scale over which that relief arrives.
+ */
+const HEAT_Z = 0.28;                       // cm; ~1/e of the floor value per 0.28 cm of height
 export function heatAt(p, env) {
-  let heat = 0; for (const h of env.hazards) { const d = Math.hypot(p[0] - h.x, p[1] - h.y); heat = Math.max(heat, h.heat * Math.max(0, 1 - Math.max(0, d - h.r) / 0.4)); }
-  return heat;
+  let heat = 0;
+  for (const h of env.hazards) {
+    const d = Math.hypot(p[0] - h.x, p[1] - h.y);
+    heat = Math.max(heat, h.heat * Math.max(0, 1 - Math.max(0, d - h.r) / 0.4));
+  }
+  const z = Math.max(0, p[2] || 0);
+  return heat * Math.exp(-z / HEAT_Z);
 }

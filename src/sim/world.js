@@ -25,6 +25,9 @@ export const DEFAULT_ENV = {
   // fly's world, so the eye rays hit it; unlike Janus it is near-black, so it reads as a dark
   // mass growing in the visual field -- which is what the looming/escape pathway responds to.
   monster: null,
+  // Whole-floor lava, 0..1. Drives the glow the host draws AND the hazard the flies feel, so the
+  // two cannot drift apart. Ramped up and down by the host rather than switched.
+  lava: 0,
 };
 
 // Environment presets ("different environments to play and survive in")

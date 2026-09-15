@@ -224,6 +224,55 @@ function wallProps(look, radius, wallHeight) {
  * Obstacles are baked into each fly's MuJoCo model when the fly is built, so switching stage
  * goes through relocate(), which rebuilds the flies carrying their learned weights across.
  */
+// Compound props. world.js compiles only boxes and cylinders, so anything with character has to
+// be assembled from them -- a palm is a trunk plus splayed fronds, a spire is a stack of shrinking
+// discs. Every piece is a real collision geom the flies can climb, which matters for The Floor Is
+// Lava: height is the only escape from a flooded floor.
+const PROP = {
+  /** trunk + splayed fronds; the fronds are climbable platforms well clear of the ground */
+  palm(x, y, h, trunk, frond) {
+    const o = [{ type: 'cylinder', x, y, r: 0.035, sz: h, color: trunk }];
+    for (let k = 0; k < 5; k++) {
+      const a = k * 1.257;
+      o.push({ type: 'box', x: x + 0.17 * Math.cos(a), y: y + 0.17 * Math.sin(a), z: h - 0.03,
+        sx: 0.19, sy: 0.05, sz: 0.018, yaw: a, color: frond });
+    }
+    return o;
+  },
+  /** stem + flat head: somewhere to perch, and a landmark at eye height */
+  flower(x, y, h, stem, head) {
+    return [{ type: 'cylinder', x, y, r: 0.018, sz: h, color: stem },
+            { type: 'cylinder', x, y, r: 0.10, sz: 0.02, z: h, color: head }];
+  },
+  /** shrinking stack: reads as a spire and gives a climbable staircase of ledges */
+  spire(x, y, tiers, r0, step, color) {
+    const o = [];
+    for (let k = 0; k < tiers; k++)
+      o.push({ type: 'cylinder', x, y, r: r0 * (1 - k / tiers), sz: step, z: k * step, color });
+    return o;
+  },
+  /** two uprights and a lintel */
+  arch(x, y, w, h, color) {
+    return [{ type: 'box', x: x - w, y, sx: 0.05, sy: 0.05, sz: h, color },
+            { type: 'box', x: x + w, y, sx: 0.05, sy: 0.05, sz: h, color },
+            { type: 'box', x, y, sx: w + 0.05, sy: 0.05, sz: 0.05, z: h, color }];
+  },
+  /** upright slab, slightly turned: gravestone, shard, standing rock */
+  slab(x, y, h, yaw, color) {
+    return [{ type: 'box', x, y, sx: 0.11, sy: 0.035, sz: h, yaw, color }];
+  },
+  /** barrel: a squat cylinder with a rim, climbable in two steps */
+  barrel(x, y, color, rim) {
+    return [{ type: 'cylinder', x, y, r: 0.11, sz: 0.20, color },
+            { type: 'cylinder', x, y, r: 0.125, sz: 0.02, z: 0.20, color: rim }];
+  },
+  /** pedestal table */
+  table(x, y, h, pole, top) {
+    return [{ type: 'cylinder', x, y, r: 0.045, sz: h, color: pole },
+            { type: 'cylinder', x, y, r: 0.20, sz: 0.035, z: h, color: top }];
+  },
+};
+
 const STAGES = {
   // the big top, as before
   carnival(env, look) {
@@ -239,8 +288,12 @@ const STAGES = {
     const P = look.prop;
     [[1.3, 0.9, 0.34], [-1.5, 0.6, 0.28], [0.4, -1.6, 0.40], [-0.9, -1.2, 0.24], [1.7, -0.9, 0.30]]
       .forEach(([x, y, r], i) => env.obstacles.push({ type: 'cylinder', x, y, r, sz: 0.06 + 0.04 * (i % 3), color: P[i % P.length] }));
-    [[0.9, 0.2], [-0.3, 1.5]].forEach(([x, y], i) =>
-      env.obstacles.push({ type: 'box', x, y, sx: 0.16, sy: 0.13, sz: 0.22, yaw: i, color: P[1] }));
+    // palms and a parasol: the tall climbable furniture of a beach, and the only high ground
+    env.obstacles.push(...PROP.palm(-1.9, 1.5, 0.62, '#8a5a33', '#3f8f4a'));
+    env.obstacles.push(...PROP.palm(2.1, 0.4, 0.50, '#8a5a33', '#4fa055'));
+    env.obstacles.push(...PROP.table(0.9, 1.9, 0.44, '#e8d9a8', P[2]));
+    env.obstacles.push(...PROP.slab(0.9, 0.2, 0.20, 0.7, '#9c7b4f'));
+    env.obstacles.push(...PROP.slab(-0.3, 1.5, 0.17, 2.1, '#8a6a42'));
     env.light.sky = 1.4; env.humidity = 0.85; env.wind = [7, 2];
     env.food = [{ x: 1.5, y: 1.4, r: 0.28, sugar: 1, bitter: 0, water: 0.9, amount: 6 }];
     env.odors = [{ x: 1.5, y: 1.4, odor: 'vinegar', strength: 0.9, sigma: 1.2 }];
@@ -257,6 +310,10 @@ const STAGES = {
       env.obstacles.push({ type: 'cylinder', x: r * Math.cos(th), y: r * Math.sin(th),
         r: 0.02, sz: 0.5 + 0.25 * (k % 4), color: P[2] });          // grass stalks
     }
+    [[1.6, 1.3, 0.46, '#ffd84d'], [-1.9, 0.5, 0.38, '#ff6fae'], [0.5, -2.1, 0.52, '#e8e8f0'],
+     [-1.1, -1.8, 0.42, '#ffb347']].forEach(([x, y, h, head]) =>
+      env.obstacles.push(...PROP.flower(x, y, h, '#4f7a3a', head)));
+    env.obstacles.push({ type: 'cylinder', x: 2.2, y: -1.2, r: 0.13, sz: 0.9, yaw: 1.1, color: '#6b4a2a' });
     env.light.sky = 1.25; env.humidity = 0.55; env.wind = [5, 3];
     env.food = [{ x: -1.4, y: 1.2, r: 0.3, sugar: 1, bitter: 0, water: 0.4, amount: 8 }];
     env.odors = [{ x: -1.4, y: 1.2, odor: 'vinegar', strength: 1, sigma: 1.5 }];
@@ -289,6 +346,8 @@ const STAGES = {
         env.obstacles.push({ type: 'cylinder', x, y, r: 0.045, sz: h, color: P[3] });
         env.obstacles.push({ type: 'cylinder', x, y, r: 0.34, sz: 0.04, z: h, color: P[i % P.length] });
       });
+    env.obstacles.push(...PROP.arch(0, 1.9, 0.30, 0.66, '#fff3cf'));
+    env.obstacles.push(...PROP.arch(-1.8, -0.6, 0.24, 0.54, '#f7e7b0'));
     env.light.sky = 1.5; env.humidity = 0.5; env.wind = [0, 0];
     env.food = ring(5, 1.5, (x, y) => ({ x, y, r: 0.26, sugar: 1, bitter: 0, water: 0.5, amount: 9 }));
     env.odors = env.food.map(f => ({ x: f.x, y: f.y, odor: 'vinegar', strength: 0.8, sigma: 0.8 }));
@@ -300,11 +359,13 @@ const STAGES = {
     // a pit: small and steep-sided, so there is nowhere far to run
     Object.assign(env.arena, { shape: 'circle', radius: 1.8, wallHeight: 2.2 });
     const P = look.prop;
+    // jagged shards, and two spires tall enough to be worth climbing when the floor floods
     for (let k = 0; k < 7; k++) {
       const th = k * 0.92, r = 0.8 + (k % 3) * 0.45;
-      env.obstacles.push({ type: 'box', x: r * Math.cos(th), y: r * Math.sin(th),
-        sx: 0.12, sy: 0.10, sz: 0.30 + 0.18 * (k % 3), yaw: th, color: P[k % P.length] });
+      env.obstacles.push(...PROP.slab(r * Math.cos(th), r * Math.sin(th), 0.30 + 0.18 * (k % 3), th, P[k % P.length]));
     }
+    env.obstacles.push(...PROP.spire(-0.9, 0.9, 5, 0.17, 0.11, '#3a1008'));
+    env.obstacles.push(...PROP.spire(1.0, -0.8, 4, 0.15, 0.12, '#5a1410'));
     env.light.sky = 0.3; env.humidity = 0.12; env.wind = [2, -1];
     env.hazards = ring(4, 1.3, (x, y) => ({ x, y, r: 0.38, heat: 0.5 }));
     env.food = [{ x: 0, y: 0, r: 0.22, sugar: 1, bitter: 0, water: 0.2, amount: 5 }];
@@ -320,6 +381,9 @@ const STAGES = {
       { type: 'cylinder', x: 0.9, y: 0.8, r: 0.16, sz: 0.9, color: look.prop[1] },
       { type: 'cylinder', x: -0.9, y: -0.8, r: 0.16, sz: 0.9, color: look.prop[2] },
       { type: 'box', x: 0.4, y: -1.3, sx: 0.9, sy: 0.08, sz: 0.45, color: look.prop[3 % look.prop.length] });
+    env.obstacles.push(...PROP.barrel(-1.4, -1.3, '#6b6257', '#43403a'));
+    env.obstacles.push(...PROP.barrel(-1.1, -1.5, '#5b5348', '#43403a'));
+    env.obstacles.push(...PROP.arch(1.2, 1.4, 0.26, 0.62, '#6b6257'));
     env.light.sky = 0.35; env.humidity = 0.45; env.wind = [0, 0];
     env.food = [{ x: 1.7, y: -1.5, r: 0.26, sugar: 1, bitter: 0, water: 0.3, amount: 6 }];
     env.odors = [{ x: 1.7, y: -1.5, odor: 'vinegar', strength: 1.2, sigma: 1.3 }];
@@ -330,6 +394,9 @@ const STAGES = {
     env.obstacles.push(
       { type: 'cylinder', x: 0.2, y: 1.2, r: 0.22, sz: 0.7, color: look.prop[0] },
       { type: 'cylinder', x: -1.2, y: -0.3, r: 0.28, sz: 0.55, color: look.prop[1] });
+    env.obstacles.push(...PROP.spire(1.6, 0.9, 5, 0.16, 0.10, '#3d5a52'));
+    env.obstacles.push(...PROP.spire(-2.0, 0.8, 4, 0.13, 0.11, '#2f4a44'));
+    env.obstacles.push(...PROP.spire(0.6, -1.0, 6, 0.14, 0.09, '#4a6b5e'));
     env.light.sky = 0.28; env.humidity = 0.9; env.wind = [2, 1];
     env.food = [{ x: -1.4, y: 1.3, r: 0.3, sugar: 1, bitter: 0, water: 0.9, amount: 6 }];
     env.odors = [{ x: -1.4, y: 1.3, odor: 'vinegar', strength: 1, sigma: 1.4 }];
@@ -419,7 +486,7 @@ async function main() {
   startAutosave();
   startOrbTicker();
   if (PRESET.autoThreat) setInterval(() => { if (!running || !flies.length) return; const live = flies.filter(f => f.last?.alive !== false); if (!live.length) return; selected = live[Math.floor(Math.random() * live.length)].id; launchThreat(); }, PRESET.autoThreat * 1000);
-  window.__arena = { camera, controls, flies, env, THREE, renderer, scene, gtao, composer, metrics, resolution, batches, visual, addFly, removeFly, renameFly, rebuildEnv, launchThreat, janusSpeak, setLook, LOOKS, relocate, stageInto, theme: THEME, releaseMonster, recallMonster, store, saveAllFlies, saveFlyRecord, PERSIST, FLY_CAP, MAX_FLIES,
+  window.__arena = { camera, controls, flies, env, THREE, renderer, scene, gtao, composer, metrics, resolution, batches, visual, addFly, removeFly, renameFly, rebuildEnv, launchThreat, janusSpeak, setLook, LOOKS, relocate, stageInto, theme: THEME, releaseMonster, recallMonster, setLava, store, saveAllFlies, saveFlyRecord, PERSIST, FLY_CAP, MAX_FLIES,
     orbDebug: () => ({ presence: orbPresence, glow: orbGlow, until: orbUntil, now: performance.now(), out: orbWasOut, spokeAt: orbSpokeAt }) };
   animate();
   if (RINGMASTER) {
@@ -1613,6 +1680,54 @@ function updateMonster(now) {
   for (const f of flies) if (f.ready) f.worker.postMessage({ type: 'env', env: { monster: env.monster, threat: env.threat } });
 }
 
+// ---------------- whole-floor lava ----------------
+// One number, env.lava (0..1), drives BOTH the glow we draw and the hazard the flies feel, so the
+// picture and the physics cannot disagree. It ramps rather than switching: the floor heats over a
+// couple of seconds and cools over ten, which is also what makes the escape interesting -- there
+// is time to climb before it bites, and the relief afterwards is gradual.
+//
+// Escape depends on heatAt() attenuating with height (senses.js). Without that, a fly on a
+// tabletop feels exactly what a fly on the floor feels and there is nowhere to go.
+let lavaLevel = 0, lavaTarget = 0, lavaSynced = 0, lavaWasOn = false;
+const LAVA = { riseMs: 2200, fallMs: 10000, heat: 0.5 };   // 0.5 is the damage threshold: full
+                                                            // nociceptor drive, no injury
+const LAVA_HOT = new THREE.Color('#ff3a10'), LAVA_DIM = new THREE.Color('#000000');
+
+/** Ask for lava. `on` ramps up; off lets it cool. Janus calls this; so does the URL harness. */
+function setLava(on) { lavaTarget = on ? 1 : 0; }
+
+function updateLava(now) {
+  const dt = Math.min(120, now - (lavaLastNow || now)); lavaLastNow = now;
+  if (lavaLevel !== lavaTarget) {
+    const rate = lavaTarget > lavaLevel ? dt / LAVA.riseMs : -dt / LAVA.fallMs;
+    lavaLevel = Math.max(0, Math.min(1, lavaLevel + rate));
+  }
+  const on = lavaLevel > 0.002;
+  if (!on && !lavaWasOn) return;
+
+  // the glow: the floor itself becomes the light source
+  if (floorMesh) {
+    const m = floorMesh.material;
+    m.emissive.copy(LAVA_DIM).lerp(LAVA_HOT, lavaLevel);
+    // a slow pulse so it reads as molten rather than as a flat red filter
+    m.emissiveIntensity = lavaLevel * (0.85 + 0.15 * Math.sin(now / 520));
+    m.needsUpdate = false;
+  }
+  shadowDirty = true;
+
+  if (now - lavaSynced < 100) return;
+  lavaSynced = now;
+  env.lava = lavaLevel;
+  // The hazard covers the entire ground, so there is no patch of floor to walk to. The only ways
+  // out are up: onto the furniture, or into the air.
+  const A = env.arena, R = (A.shape === 'rect' ? Math.hypot(A.w, A.h) : A.radius) + 0.3;
+  if (on) env.hazards = [{ x: 0, y: 0, r: R, heat: LAVA.heat * lavaLevel }];
+  else if (lavaWasOn) env.hazards = [];
+  lavaWasOn = on;
+  for (const f of flies) if (f.ready) f.worker.postMessage({ type: 'env', env: { hazards: env.hazards, lava: env.lava } });
+}
+let lavaLastNow = 0;
+
 // ---------------- render loop ----------------
 let lastFrame = performance.now(), fpsN = 0, fpsT = 0, lastSim = 0, lastSimReal = performance.now();
 const q = new THREE.Quaternion(), previousQ = new THREE.Quaternion(), followDelta = new THREE.Vector3(), brainBase = new THREE.Color();
@@ -1662,7 +1777,7 @@ function animate() {
   const sf = flies.find(x => x.id === selected);
   if (sf?.last && $('#follow').checked) { const p = sf.last.pos; followDelta.set(p[0], p[1], p[2]).sub(controls.target).multiplyScalar(0.1); controls.target.add(followDelta); camera.position.add(followDelta); }
   if (sf?.last) { const t = sf.last.t / 1000; $('#simt').textContent = t.toFixed(2); if (now - lastSimReal > 1000) { $('#rt').textContent = ((t - lastSim) / ((now - lastSimReal) / 1000)).toFixed(2); lastSim = t; lastSimReal = now; } }
-  updateThreat(); updateMonster(now); controls.update();
+  updateThreat(); updateMonster(now); updateLava(now); controls.update();
   camera.updateMatrixWorld();
   viewFrustum.setFromProjectionMatrix(viewProjection.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse));
   let largest = 0;

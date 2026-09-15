@@ -105,13 +105,18 @@ const ADVENTURES = [
   },
   {
     name: 'The Floor Is Lava',
-    line: 'THE FLOOR IS LAVA! Not metaphorically. Please mind your tarsi.',
+    line: 'THE FLOOR IS LAVA! Not metaphorically. Get UP — climb something, or fly.',
+    lava: true,
     apply: env => {
-      env.hazards = ring(3, 1.2, (x, y) => ({ x, y, r: 0.42, heat: 1 }));
+      // The hazard itself is owned by setLava(): it covers the WHOLE floor and ramps, so there is
+      // no cool patch to walk to. heatAt() falls off with height, so the furniture and the air are
+      // the only relief -- which is the point of the scenario.
+      env.hazards = [];
       env.food = [{ x: 0, y: 1.9, r: 0.26, sugar: 1, bitter: 0, water: 0.3, amount: 6 }];
       env.odors = [{ x: 0, y: 1.9, odor: 'vinegar', strength: 1, sigma: 1 }];
       env.bitterPatches = []; env.wind = [0, 0];
     },
+    restore: env => { env.lava = 0; },
   },
   {
     name: 'A Stiff Breeze',
@@ -270,6 +275,7 @@ export function startRingmaster(arena, { period = 75000, onLine = null } = {}) {
   function runAdventure(which = null) {
     if (adventure?.restore) adventure.restore(arena.env);
     arena.recallMonster?.();          // never leave a beast loose across a scene change
+    arena.setLava?.(false);           // and never leave the floor molten
     if (which) { idx = ADVENTURES.findIndex(a => a.name === which); if (idx < 0) idx = 0; }
     else idx = (idx + 1 + ((Math.random() * (ADVENTURES.length - 1)) | 0)) % ADVENTURES.length;
     adventure = ADVENTURES[idx];
@@ -283,6 +289,11 @@ export function startRingmaster(arena, { period = 75000, onLine = null } = {}) {
       for (const f of arena.flies) if (f.ready) f.worker.postMessage({ type: 'env', env: arena.env });
       say(adventure.line, { priority: 2 });
       if (adventure.threat && arena.launchThreat) setTimeout(() => arena.launchThreat(), 6000);
+      if (adventure.lava && arena.setLava) {
+        arena.setLava(true);
+        // it floods, it bites, and then it cools slowly rather than blinking off
+        setTimeout(() => { arena.setLava(false); say('And... cooling. You may come down. Slowly.', { priority: 2 }); }, 34000);
+      }
       if (adventure.monster && arena.releaseMonster) setTimeout(() => {
         if (arena.releaseMonster()) say('There. In the dark. Do you see it?', { priority: 3 });
       }, 4000);
@@ -349,6 +360,7 @@ export function startRingmaster(arena, { period = 75000, onLine = null } = {}) {
     if (/\b(calm|clear|reset|stop|peace|quiet)\b/i.test(text)) {
       if (adventure?.restore) adventure.restore(arena.env);
       adventure = null;
+      arena.setLava?.(false);
       arena.env.hazards = []; arena.env.bitterPatches = []; arena.env.wind = [0, 0];
       arena.env.light.sky = 1;
       arena.env.food = [{ x: 1.0, y: 0.6, r: 0.25, sugar: 1, bitter: 0, water: 0.2, amount: 5 }];
