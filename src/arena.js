@@ -69,13 +69,17 @@ let PERSIST = new URLSearchParams(location.search).get('persist') !== '0' && LEA
 // step with these, so a higher-contrast arena drives the photoreceptors harder.
 const THEME = new URLSearchParams(location.search).get('theme') === 'lab' ? 'lab' : 'circus';
 const LOOKS = {
-  circus: { floorA: '#12121a', floorB: '#f0ede4', wallA: '#e02128', wallB: '#f6c624',
+  circus: { floorA: '#132049', floorB: '#f0ede4', wallA: '#e02128', wallB: '#f6c624',
             prop: ['#21c8e4', '#ff4fa3', '#9ae62c', '#ff8a2b', '#a45cff', '#2bd9b0'],
             bunting: ['#21c8e4', '#ff4fa3', '#f6c624', '#9ae62c'], food: '#ffd84d', sky: '#1a0f1e',
             tent: true, props: true, stair: { x: -0.15, y: -0.15, color: '#e02128', pole: '#8e1118', dais: '#f6c624' },
             // relative luminance of the four surfaces above, handed to the flies' albedo()
             orb: '#ff2318', orbGlow: '#ff6a4a',
-            albedo: { floorLo: 0.06, floorHi: 0.92, wallLo: 0.29, wallHi: 0.77 } },
+            // Rec.709 luma of the four surfaces above, on the sRGB bytes / 255. The navy floor
+            // is 0.126 where the old near-black was 0.073, so the floor's contrast ratio falls
+            // from ~13:1 to ~7:1 -- a real change to what the photoreceptors are handed, not a
+            // repaint, which is why the number moves with the colour.
+            albedo: { floorLo: 0.126, floorHi: 0.92, wallLo: 0.29, wallHi: 0.77 } },
   lab:    { floorA: '#6f6554', floorB: '#9c907a', wallA: '#2a2a2e', wallB: '#c9c9cf',
             prop: ['#3d4a3d'], bunting: null, food: '#f2c14e', sky: '#0b0e14',
             tent: false, stair: null, orb: '#ff2318', orbGlow: '#ff6a4a',
@@ -112,6 +116,7 @@ const env = PRESET.env();
 // from one definition, because env is what gets sent to every worker.
 if (LOOK.stair) env.obstacles.push(...spiralStaircase(LOOK.stair));
 if (LOOK.props) env.obstacles.push(...carnivalProps(LOOK));
+if (LOOK.props) env.obstacles.push(...wallProps(LOOK, env.arena.radius, env.arena.wallHeight));
 /** 16 raised, rotated treads around a newel post: 30 degrees and 0.062 cm per step (~1.33 turns, ~1 cm tall). */
 function spiralStaircase({ x, y, color, pole, dais }) {
   const N = 22, rise = 0.062, turn = Math.PI / 6, rHelix = 0.34, out = [];
@@ -157,6 +162,30 @@ function carnivalProps(look) {
   // low scattered blocks, the loose confetti of the set
   [[0.55, 0.95], [-0.45, -0.95], [1.15, 0.25], [-0.85, 0.35], [0.25, 1.65], [1.85, 1.65]]
     .forEach(([x, y], i) => out.push({ type: 'box', x, y, sx: 0.10, sy: 0.10, sz: 0.13 + 0.05 * (i % 3), color: pick(i) }));
+  return out;
+}
+
+/**
+ * Wall furniture: brackets and plaques mounted high on the stripes, as in the reference.
+ *
+ * Mounted just inside the wall and yawed to face the centre, so they protrude into the arena as
+ * ledges a fly can land on rather than being flat decals. Real obstacles, like everything else
+ * in here -- they occlude, they collide, and clearance() sees them.
+ */
+function wallProps(look, radius, wallHeight) {
+  const P = look.prop, out = [];
+  const N = 10, rIn = radius - 0.13;
+  for (let k = 0; k < N; k++) {
+    const th = (k + 0.5) / N * 2 * Math.PI;
+    const x = rIn * Math.cos(th), y = rIn * Math.sin(th);
+    // alternate a deep shelf and a shallow plaque so the ring is not a row of identical boxes
+    const deep = k % 2 === 0;
+    out.push({ type: 'box', x, y, yaw: th,
+      sx: deep ? 0.10 : 0.05, sy: deep ? 0.20 : 0.26,
+      sz: deep ? 0.05 : 0.14,
+      z: wallHeight * (deep ? 0.62 : 0.70),
+      color: P[k % P.length] });
+  }
   return out;
 }
 
