@@ -82,7 +82,8 @@ async function advance(dt, maxWallMs = 600000) {
 async function measure(dt, onSample) {
   const t0 = simS(), w0 = performance.now();
   const st = flies().map(f => ({ name: f.name, n: 0, z: 0, zMax: 0, safe: 0, flying: 0,
-    heat: 0, gf: 0, jumps0: f.last?.jumps ?? 0, flights0: f.last?.flights ?? 0, climbed: 0, lastZ: null }));
+    heat: 0, gf: 0, jumps0: f.last?.jumps ?? 0, flights0: f.last?.flights ?? 0, climbed: 0, lastZ: null,
+    dnPop: 0, dnRel: 0, dnRelMax: 0, dnN: 0 }));
   while (simS() < t0 + dt) {
     if (anyDead() || performance.now() - w0 > 600000) break;
     await sleep(100);
@@ -95,6 +96,11 @@ async function measure(dt, onSample) {
       else if (q.lastZ !== null && z > q.lastZ) q.climbed += z - q.lastZ;   // height gained on foot
       q.lastZ = z;
       q.gf = Math.max(q.gf, s.cmd?.escape || 0);
+      // The WHOLE descending population, measured whether or not the motor layer reads it. This
+      // is what separates "the fly does not escape" from "the command exists and nothing reads
+      // it" -- the ambiguity a 18-of-1,314 readout would otherwise leave permanently open.
+      const dn = s.cmd?.dn;
+      if (dn) { q.dnPop += dn.pop; q.dnRel += dn.rel; q.dnRelMax = Math.max(q.dnRelMax, dn.rel); q.dnN = dn.n; }
       onSample?.(i, z, h, s);
     });
   }
@@ -108,14 +114,18 @@ async function measure(dt, onSample) {
       climbed: +q.climbed.toFixed(2),
       takeoffs: (s?.jumps ?? 0) - q.jumps0,
       flights: (s?.flights ?? 0) - q.flights0,
-      gfPeak: +q.gf.toFixed(0) };
+      gfPeak: +q.gf.toFixed(0),
+      dnPop: +(q.dnPop / Math.max(1, q.n)).toFixed(3),
+      dnRel: +(q.dnRel / Math.max(1, q.n)).toFixed(4),
+      dnRelMax: +q.dnRelMax.toFixed(4),
+      dnN: q.dnN };
   });
 }
 
 const fmt = rows => rows.map(r =>
   `${String(r.fly).padEnd(7)} z ${r.z.toFixed(3)} (max ${r.zMax.toFixed(2)})  safe ${String(r.safePct).padStart(3)}%  ` +
   `fly ${String(r.flyPct).padStart(3)}%  climb ${r.climbed.toFixed(2)}  heat ${r.heat.toFixed(3)}  ` +
-  `takeoff ${r.takeoffs}  GF ${r.gfPeak}Hz`);
+  `takeoff ${r.takeoffs}  GF ${r.gfPeak}Hz  DN ${r.dnPop.toFixed(2)}Hz (rel ${(100*r.dnRel).toFixed(1)}%, peak ${(100*r.dnRelMax).toFixed(1)}%)`);
 
 async function condition(lava) {
   const tag = lava ? 'LAVA' : 'control';
@@ -183,11 +193,22 @@ async function condition(lava) {
       say(`  escaped (rose >0.06 cm): ${lat.length} of ${hot.firstRise.length}` +
           (lat.length ? `, median latency ${lat.sort((a, b) => a - b)[Math.floor(lat.length / 2)].toFixed(2)} s sim` : ''));
       say('');
-      say(dz > 0.03
-        ? '  The animals went UP when the floor flooded, beyond what they do anyway.'
-        : '  NO escape above control. Either the fly does not respond to a hot floor, or the');
-      if (dz <= 0.03) say('  escape command is computed and never read — the motor layer reads ~18 of 1,314');
-      if (dz <= 0.03) say('  descending neurons, so those two possibilities are not distinguished here.');
+      // The descending population settles the ambiguity a behavioural null would otherwise leave.
+      const dnHot = mean(hot.treat, 'dnRelMax'), dnCtl = mean(ctrl.treat, 'dnRelMax');
+      say(`  descending population (all ${hot.treat[0]?.dnN ?? 0} neurons), peak rise above own baseline:`);
+      say(`     control ${(100 * dnCtl).toFixed(1)}%    lava ${(100 * dnHot).toFixed(1)}%`);
+      say('');
+      if (dz > 0.03) {
+        say('  The animals went UP when the floor flooded, beyond what they do anyway.');
+      } else if (dnHot - dnCtl > 0.02) {
+        say('  NO escape, but the descending population DID respond. The command is computed and');
+        say('  the motor layer does not read it: ~18 of 1,314 descending neurons are wired to the');
+        say('  body. That is a finding about the artefact, not about fly behaviour.');
+      } else {
+        say('  NO escape, and the descending population did not respond either. The command is not');
+        say('  being issued, so reading more of it would not help. The failure is upstream of the');
+        say('  motor layer — in how thermosensory drive propagates, or in the neuron model itself.');
+      }
     }
     colour = '#4ade80'; head = 'THERMAL ESCAPE — done'; paint();
     window.__thermalResults = out;

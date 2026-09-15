@@ -15,7 +15,7 @@ import { createBrain } from '../brainmodel.js';
 const Rt9 = (xm, b) => [xm[b * 9], xm[b * 9 + 3], xm[b * 9 + 6]];   // body x axis (heading) in world frame
 
 export class FlyAgent {
-  constructor({ mj, flyXML, env, data, size, sign, bodymap, gait, id = 0, pos = [0, 0], yaw = 0, nProxies = 0, mode = 'descending', brainOpts = {}, vision = true, brain = null, flyvis = null, intrinsic = true, seed = 0, neuromod = null, sex = 'm', look = null, mushroom = null, learn = true, etaMul = 1, mbParams = null, noci = false }) {
+  constructor({ mj, flyXML, env, data, size, sign, bodymap, gait, id = 0, pos = [0, 0], yaw = 0, nProxies = 0, mode = 'descending', brainOpts = {}, vision = true, brain = null, flyvis = null, intrinsic = true, seed = 0, neuromod = null, sex = 'm', look = null, mushroom = null, learn = true, etaMul = 1, mbParams = null, noci = false, dnAll = false }) {
     this.id = id; this.mj = mj; this.env = env; this.data = data; this.vision = vision; this.sex = sex;
     // Reflectance of the checker floor and striped wall, matching whatever the host is drawing.
     // Defaults are the original muted arena; the circus theme is far higher contrast.
@@ -51,7 +51,7 @@ export class FlyAgent {
     // vision: flyvis optic-lobe model driving the male-CNS optic lobe (if provided), else the simple photoreceptor eye
     this.fv = vision && flyvis ? new FlyVisionFV(mj, M, this.mjd, bodymap, flyvis.map, flyvis.eyes, this.bid.head, this.bid.thorax, flyvis.gain ?? 150) : null;
     this.eye = vision && !this.fv ? new CompoundEye(mj, M, this.mjd, bodymap, this.bid.head, this.bid.thorax) : null;
-    this.motor = new Motor(mj, M, this.mjd, bodymap, typeOf, sideOf, gait, mode);
+    this.motor = new Motor(mj, M, this.mjd, bodymap, typeOf, sideOf, gait, mode, { dnAll });
     this.intrinsic = intrinsic ? new Intrinsic(typeOf, sideOf, id + 1 + (seed || 0), bodymap.feeding) : null;
     this.flight = new Flight({ mj, model: M, data: this.mjd, thorax: this.bid.thorax, jointAdr: this.jointAdr, act: this.motor.act, range: this.motor.range, rand: this.intrinsic?.rand });
     // Per-fly associative memory over the KC->MBON slice. Private to this animal; the shared

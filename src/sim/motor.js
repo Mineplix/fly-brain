@@ -31,7 +31,11 @@ const PIVOT = { turn: 0.25, amp: 0.55, inner: -0.7 };   // turning on the spot
 const PHASE = { T1_left: 0, T2_right: 0, T3_left: 0, T1_right: Math.PI, T2_left: Math.PI, T3_right: Math.PI };
 
 export class Motor {
-  constructor(mj, model, data, bodymap, typeOf, sideOf, gait, mode = 'descending') {
+  /**
+   * @param {object} opts  { dnAll } -- when true, the WHOLE descending population contributes to
+   *   locomotor drive, not only the ~18 named types. See readDescending().
+   */
+  constructor(mj, model, data, bodymap, typeOf, sideOf, gait, mode = 'descending', opts = {}) {
     this.model = model; this.data = data; this.mode = mode; this.gait = gait;
     this.act = {}; for (let i = 0; i < model.nu; i++) this.act[model.actuator(i).name] = i;
     this.range = {}; const cr = model.actuator_ctrlrange; for (let i = 0; i < model.nu; i++) this.range[model.actuator(i).name] = [cr[2 * i], cr[2 * i + 1]];
@@ -39,9 +43,27 @@ export class Motor {
     const pop = (roles, s) => Object.entries(roles).flatMap(([t, w]) => byType(t, s).map(i => [i, w]));
     this.dn = { forward: pop(DN_ROLES.forward), backward: pop(DN_ROLES.backward), escape: pop(DN_ROLES.escape).map(x => x[0]), takeoff: pop(DN_ROLES.takeoff), groom: pop(DN_ROLES.groom),
       turnL: pop(DN_ROLES.turn, 1), turnR: pop(DN_ROLES.turn, 2), courtP: pop(DN_ROLES.courtP), courtDN: pop(DN_ROLES.courtDN) };
+    // The FULL descending population, by superclass rather than by name. The motor layer proper
+    // reads ~18 named types; this is every neuron the connectome labels descending, so the
+    // population can be MEASURED even when it is not read. Without it, a fly that fails to escape
+    // cannot be told apart from a fly whose escape command is computed and then ignored.
+    const scNames = (data.meta && data.meta.superclasses) || [];
+    const dnSc = scNames.indexOf('descending_neuron');
+    this.dnAllIdx = []; this.dnAllSide = [];
+    if (dnSc >= 0 && data.superclass) {
+      for (let i = 0; i < data.superclass.length; i++) {
+        if (data.superclass[i] === dnSc) { this.dnAllIdx.push(i); this.dnAllSide.push(sideOf[i]); }
+      }
+    }
+    this.dnAllIdx = Int32Array.from(this.dnAllIdx);
+    this.dnAllSide = Int8Array.from(this.dnAllSide);
+    this.useAllDN = !!opts.dnAll;
+    this.dnStats = { pop: 0, left: 0, right: 0, n: this.dnAllIdx.length, base: 0, rel: 0 };
+    this._dnBase = 0; this._dnPrimed = false;
+
     this.muscles = bodymap.muscles; this.ttmn = bodymap.jump;
     this.rate = new Float32Array(typeOf.length);    // low-pass filtered firing rate per neuron (Hz), only for used neurons
-    this.used = new Set([...this.dn.forward.map(x => x[0]), ...this.dn.backward.map(x => x[0]), ...this.dn.escape, ...this.dn.takeoff.map(x => x[0]), ...this.dn.groom.map(x => x[0]), ...this.dn.turnL.map(x => x[0]), ...this.dn.turnR.map(x => x[0]), ...this.dn.courtP.map(x => x[0]), ...this.dn.courtDN.map(x => x[0]), ...bodymap.jump, ...bodymap.feeding]);
+    this.used = new Set([...this.dn.forward.map(x => x[0]), ...this.dn.backward.map(x => x[0]), ...this.dn.escape, ...this.dn.takeoff.map(x => x[0]), ...this.dn.groom.map(x => x[0]), ...this.dn.turnL.map(x => x[0]), ...this.dn.turnR.map(x => x[0]), ...this.dn.courtP.map(x => x[0]), ...this.dn.courtDN.map(x => x[0]), ...bodymap.jump, ...bodymap.feeding, ...this.dnAllIdx]);
     for (const m of this.muscles) for (const i of m.idx) this.used.add(i);
     this.used = Int32Array.from(this.used);
     this.lastCount = new Uint32Array(typeOf.length);
@@ -81,8 +103,41 @@ export class Motor {
     this.turnBase = (this.turnBase || 0) + dtMs / R0.turnAdaptTau * (this.turnF - (this.turnBase || 0));
     // courtship circuit readout: pIP10 and DNp13 sit downstream of the pheromone pathways (2 hops from the
     // cVA and tarsal pheromone receptors); both roughly double their rate near another fly
+    // --- the descending population as a whole -------------------------------------------------
+    // Measured every step whether or not it is read, so "did the brain issue a command" is a
+    // question with an answer rather than an inference.
+    {
+      const ix = this.dnAllIdx, sd = this.dnAllSide;
+      let sum = 0, l = 0, nl = 0, r = 0, nr = 0;
+      for (let k = 0; k < ix.length; k++) {
+        const v = this.rate[ix[k]];
+        sum += v;
+        if (sd[k] === 1) { l += v; nl++; } else if (sd[k] === 2) { r += v; nr++; }
+      }
+      const pop = ix.length ? sum / ix.length : 0;
+      // slow baseline, so a RISE is detectable against this population's own tonic level
+      if (!this._dnPrimed) { this._dnBase = pop; this._dnPrimed = true; }
+      else this._dnBase += (pop - this._dnBase) * 0.0002;        // ~5 s at 1 ms steps
+      this.dnStats = { pop, left: nl ? l / nl : 0, right: nr ? r / nr : 0, n: ix.length,
+        base: this._dnBase, rel: this._dnBase > 1e-6 ? (pop - this._dnBase) / this._dnBase : 0 };
+    }
+
     const court = Math.max(0, Math.min(1, 0.5 * Math.max(0, this.wmean(this.dn.courtP) - R0.courtPBase) / R0.courtPScale + 0.5 * Math.max(0, this.wmean(this.dn.courtDN) - R0.courtDNBase) / R0.courtDNScale));
-    this.cmd = { v, turn: Math.max(-0.6, Math.min(0.6, (this.turnF - this.turnBase) / R0.turnScale)), drive: fwd, back, groom, grooming, escape: this.mean(this.dn.escape), takeoff: this.wmean(this.dn.takeoff), court };
+    // ?dnall=1: let the whole population contribute. Total rise above the population's own tonic
+    // level adds forward drive; the left/right imbalance adds steering. This is a population-vector
+    // assumption and a strong one -- descending neurons are heterogeneous, and some of them command
+    // stopping, grooming or backward walking, so summing them measures "how loudly is the brain
+    // saying something" rather than "what is it saying". It is a test of whether the signal exists
+    // in the population at all, not a claim about the decoding the ventral nerve cord performs.
+    let vAll = v, turnAll = null;
+    if (this.useAllDN && this.dnAllIdx.length) {
+      const d = this.dnStats;
+      const push = Math.max(0, d.rel) * 1.2;                     // relative rise -> extra drive
+      vAll = Math.min(1, v + push);
+      const imbalance = (d.left - d.right) / Math.max(1e-6, d.left + d.right);
+      turnAll = Math.max(-0.6, Math.min(0.6, imbalance * 2.5));
+    }
+    this.cmd = { v: vAll, turn: turnAll !== null ? turnAll : Math.max(-0.6, Math.min(0.6, (this.turnF - this.turnBase) / R0.turnScale)), drive: fwd, back, groom, grooming, escape: this.mean(this.dn.escape), takeoff: this.wmean(this.dn.takeoff), court, dn: this.dnStats };
     if (this.mode === 'connectome') {
       for (const leg of LEGS) for (const sd of SIDES) {
         for (const j of ['coxa', 'coxa_abduct', 'coxa_twist', 'femur', 'femur_twist', 'tibia', 'tarsus', 'tarsus2']) set(`${j}_${leg}_${sd}`, muscleCtrl(`${j}_${leg}_${sd}`));

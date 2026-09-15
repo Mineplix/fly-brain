@@ -55,6 +55,9 @@ const ETA_MUL = Math.max(0, Number(new URLSearchParams(location.search).get('eta
 // addition beyond the connectome, supplying afferents the EM volume does not contain, and any
 // result that depends on it must say so. ?noci=1 to enable.
 const NOCI_ON = new URLSearchParams(location.search).get('noci') === '1';
+// ?dnall=1 lets the WHOLE descending population drive locomotion instead of ~18 named types.
+// The population is measured either way; this decides whether it is also read.
+const DN_ALL = new URLSearchParams(location.search).get('dnall') === '1';
 const DA_FLOOR_RAW = Number(new URLSearchParams(location.search).get('dafloor'));
 const DA_FLOOR = Number.isFinite(DA_FLOOR_RAW) && DA_FLOOR_RAW >= 0 ? DA_FLOOR_RAW : null;
 // Persistent flies. Each fly's learned mushroom-body weights are kept locally (IndexedDB,
@@ -925,7 +928,7 @@ async function addFly(pos, yaw, sex = 'm', saved = null) {
   scene.add(f.group); flies.push(f); batches.add(f); stackAddFly(id); eyeAddFly(f);
   worker.onmessage = e => onWorker(f, e.data);
   worker.postMessage({ type: 'init', id, graph: shared, meta, bodymap, flyXML, gait, env, pos, yaw, nProxies: MAX_FLIES - 1, mode: $('#mode').value, brainOpts: brainParams, neuromod: neuromodCalib, vision: !NO_VISION, sex, look: LOOK.albedo,
-    brainMem: { memory: brainMem.memory, graph: brainMem.graph, bases: brainMem.bases, opts: brainMem.opts, fv: brainMem.fv }, wasmModule, slot: id, flyvisMap, mushroom, learn: LEARN, etaMul: ETA_MUL, noci: NOCI_ON, mbParams: DA_FLOOR === null ? null : { phasicFloor: DA_FLOOR },
+    brainMem: { memory: brainMem.memory, graph: brainMem.graph, bases: brainMem.bases, opts: brainMem.opts, fv: brainMem.fv }, wasmModule, slot: id, flyvisMap, mushroom, learn: LEARN, etaMul: ETA_MUL, noci: NOCI_ON, dnAll: DN_ALL, mbParams: DA_FLOOR === null ? null : { phasicFloor: DA_FLOOR },
     mbState: saved?.mb || null, restore: saved ? { energy: saved.energy, health: saved.health } : null },
     saved?.mb ? [saved.mb] : []);
   await new Promise(res => { f.onReady = res; });
