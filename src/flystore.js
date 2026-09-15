@@ -93,22 +93,31 @@ export async function deleteFly(name) {
   await tx('readwrite', st => st.delete(name));
 }
 
-/** Rename in place, carrying the brain across. No-op if the new name is taken. */
+/**
+ * Rename in place, carrying the brain across.
+ *
+ * @returns {Promise<'ok'|'taken'|'absent'>} These must NOT be conflated. 'absent' means the fly
+ *   had no saved record yet, which is an ordinary rename that should simply proceed; 'taken'
+ *   means another saved fly owns the target name and renaming would destroy its brain. An earlier
+ *   version returned false for both, so renaming a never-saved fly was treated as a name clash --
+ *   which reverted the rename and raised an alert(), and an alert() blocks a headless renderer
+ *   forever. That hung an unattended verification run for 25 minutes.
+ */
 export async function renameStored(oldName, newName) {
-  if (oldName === newName) return true;
+  if (oldName === newName) return 'ok';
   const d = await db();
   return new Promise((res, rej) => {
     const t = d.transaction(STORE, 'readwrite'), st = t.objectStore(STORE);
     const g = st.get(oldName);
     g.onsuccess = () => {
       const rec = g.result;
-      if (!rec) { res(false); return; }
       const c = st.get(newName);
       c.onsuccess = () => {
-        if (c.result) { res(false); return; }        // don't clobber another fly's brain
+        if (c.result) { res('taken'); return; }       // don't clobber another fly's brain
+        if (!rec) { res('absent'); return; }          // nothing saved yet: the caller just carries on
         st.delete(oldName);
         st.put({ ...rec, name: newName });
-        res(true);
+        res('ok');
       };
     };
     t.onerror = () => rej(t.error);

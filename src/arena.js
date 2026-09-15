@@ -845,7 +845,9 @@ const takeSlot = () => (freeSlots.length ? freeSlots.shift() : nextSlot++);
  *   rather than creating a naive one.
  */
 async function addFly(pos, yaw, sex = 'm', saved = null) {
-  if (flies.length >= FLY_CAP) { alert(`Fly limit reached: ${FLY_CAP}. Delete one first.`); return; }
+  // No alert() here: addFly is called programmatically by the measurement harnesses, and an
+  // alert() blocks a headless renderer forever. The UI button reports the cap itself.
+  if (flies.length >= FLY_CAP) { console.warn(`[flies] cap reached: ${FLY_CAP}`); status(`Fly limit reached: ${FLY_CAP}.`); return; }
   const id = takeSlot();
   const color = saved?.color || FLY_COLORS[id % FLY_COLORS.length];
   if (saved?.sex) sex = saved.sex;
@@ -966,7 +968,8 @@ function renameFly(id, name) {
   const was = f.name;
   const want = String(name).trim().slice(0, 24) || `Fly ${id}`;
   if (want !== was && flies.some(x => x !== f && x.name === want)) {
-    alert(`"${want}" is already in the ring.`);
+    console.warn(`[flies] "${want}" is already in the ring.`);
+    status(`"${want}" is already in the ring.`);
     return false;
   }
   f.name = want;
@@ -975,11 +978,14 @@ function renameFly(id, name) {
   // that refusal would overwrite that fly's brain with this one's, so the rename is reverted
   // instead. Losing a trained animal to a name clash is worse than refusing the rename.
   if (PERSIST && want !== was) store.renameStored(was, want)
-    .then(ok => {
-      if (ok) return;
+    .then(r => {
+      if (r === 'ok') return;
+      if (r === 'absent') { saveFlyRecord(f, { force: true }); return; }   // nothing saved yet: file it now
+      // 'taken': another SAVED fly owns this name. Undo rather than overwrite its brain.
       f.name = was;
       renderFlyList(); stackLabels(true); eyeLabels();
-      alert(`A saved fly is already called "${want}". The rename was undone so its brain is not overwritten.`);
+      console.warn(`[flystore] "${want}" belongs to a saved fly; rename undone so its brain survives.`);
+      status(`"${want}" belongs to a saved fly — rename undone.`);
     })
     .catch(e => console.warn('[flystore] rename failed', e));
   renderFlyList(); stackLabels(true); eyeLabels();

@@ -83,7 +83,9 @@ const browser = await launch({
   // extensions would compete for CPU with the thing being measured -- but the profile must also
   // live outside the repo, because Chrome keeps session files locked and Vite's watcher dies
   // with EBUSY trying to watch them, taking the dev server (and the run) down with it.
-  userDataDir: join(tmpdir(), 'naf-bench-chrome-profile'),
+  // Per-process profile. A shared one deadlocks the next run if a previous Chrome was left
+  // holding it -- puppeteer refuses to launch and the whole harness dies before it starts.
+  userDataDir: join(tmpdir(), `naf-bench-${process.pid}`),
   args: [
     // the point of the whole exercise
     '--disable-background-timer-throttling',

@@ -39,7 +39,9 @@ const URL_ = `${BASE}/arena.html?flies=3&noci=1&persist=1&ringmaster=0&vision=0`
 
 const browser = await launch({
   executablePath: CHROME, headless: 'new', protocolTimeout: 0,
-  userDataDir: join(tmpdir(), 'naf-verify-chrome-profile'),
+  // Per-process profile. A shared one deadlocks the next run if a previous Chrome was left
+  // holding it -- puppeteer refuses to launch and the whole harness dies before it starts.
+  userDataDir: join(tmpdir(), `naf-verify-${process.pid}`),
   args: ['--disable-background-timer-throttling', '--disable-renderer-backgrounding',
          '--disable-backgrounding-occluded-windows', '--enable-unsafe-webgpu',
          '--use-gl=angle', '--use-angle=default', '--window-size=1280,800'],
