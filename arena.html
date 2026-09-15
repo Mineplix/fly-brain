@@ -82,6 +82,17 @@
 <script>
   // ?arousal=1 runs the persistent-defensive-arousal paradigm from public/arousal.js.
   // Same tag-injection trick as the conditioning probe below, for the same reason.
+  // ?thermal=1 runs the thermal-escape validation from public/thermal.js.
+  if (new URLSearchParams(location.search).get('thermal') === '1') {
+    var __t = setInterval(function () {
+      if (!window.__arena) return;
+      clearInterval(__t);
+      var s = document.createElement('script');
+      s.type = 'module'; s.src = '/thermal.js';
+      s.onerror = function () { alert('thermal.js failed to load'); };
+      document.head.appendChild(s);
+    }, 500);
+  }
   if (new URLSearchParams(location.search).get('arousal') === '1') {
     var __a = setInterval(function () {
       if (!window.__arena) return;
