@@ -115,8 +115,12 @@ const env = PRESET.env();
 // world.js builds collision geoms, clearance() senses them, and the eye rays hit them -- all
 // from one definition, because env is what gets sent to every worker.
 if (LOOK.stair) env.obstacles.push(...spiralStaircase(LOOK.stair));
-if (LOOK.props) env.obstacles.push(...carnivalProps(LOOK));
-if (LOOK.props) env.obstacles.push(...wallProps(LOOK, env.arena.radius, env.arena.wallHeight));
+// ?props=0 stages the ring with the staircase alone. Obstacles are baked into each fly's
+// MuJoCo model by buildWorldXML at creation, so their cost can only be compared across separate
+// page loads -- mutating env.obstacles afterwards changes sensing and the render, not physics.
+const PROPS_ON = new URLSearchParams(location.search).get('props') !== '0';
+if (LOOK.props && PROPS_ON) env.obstacles.push(...carnivalProps(LOOK));
+if (LOOK.props && PROPS_ON) env.obstacles.push(...wallProps(LOOK, env.arena.radius, env.arena.wallHeight));
 /** 16 raised, rotated treads around a newel post: 30 degrees and 0.062 cm per step (~1.33 turns, ~1 cm tall). */
 function spiralStaircase({ x, y, color, pole, dais }) {
   const N = 22, rise = 0.062, turn = Math.PI / 6, rHelix = 0.34, out = [];

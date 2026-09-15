@@ -1380,6 +1380,7 @@ thermosensory at 0 in both (no hazard) — the two antennal channels stay indepe
 | `?persist=0` | don't save or restore flies (use for any benchmark or controlled run) |
 | `?dafloor=X` | phasic-dopamine gate threshold (default 0.15); ALWAYS pair with an unpunished control |
 | `?noci=1` | nociceptive afferents onto PPL1 (OFF by default; an addition beyond the connectome) |
+| `?props=0` | stage the ring with the staircase alone (for obstacle-cost comparisons) |
 | `?cond=1` | run the differential-conditioning probe |
 | `?train=N` | training seconds for that probe |
 
@@ -1843,3 +1844,63 @@ a finding.
 - several independent flies (separate workers = different brain seeds)
 - washout between conditions, checked by return to a common baseline
 - longer windows, sized against the bout structure rather than convenience
+
+---
+
+## 26. Furnishing the arena makes it FASTER
+
+After staging the carnival (31 extra obstacles, 25 -> 56), the obvious worry was
+throughput: every obstacle is a collision geom in every fly's MuJoCo world and is
+walked by `clearance()` each sensory tick. The measurement says the worry was
+backwards.
+
+### How to measure it at all
+
+`buildWorldXML` bakes obstacles into each fly's model **at creation**. Mutating
+`env.obstacles` afterwards changes `clearance()` and the render but NOT the
+physics, so an in-session A/B measures almost nothing. `?props=0` exists so the
+two arrangements can be compared across separate page loads.
+
+Protocol: one page load per cell, one warm-up window discarded, then repeated
+20 s windows, median reported. One fly, circus theme, same everything else.
+
+### The 2x2
+
+| | vision ON | vision OFF |
+|---|---|---|
+| props ON (56 obstacles) | **0.0302** | 0.0399 |
+| props OFF (25 obstacles) | **0.0177** | 0.0445 |
+
+    props ON,  vision ON    0.02854  0.02999  0.03039  0.03054
+    props OFF, vision ON    0.01744  0.01740  0.01774  0.01775
+    props ON,  vision OFF   0.03964  0.04129  0.03979
+    props OFF, vision OFF   0.04452  0.04134  0.04505
+
+Variance within a cell is ~1%, so none of this is noise.
+
+### The direction flips with vision
+
+- **vision OFF**: the 31 extra obstacles cost **~10%**. That is the honest
+  physics + `clearance()` overhead, and it is small.
+- **vision ON**: the same obstacles make the sim **1.7x FASTER**.
+
+**Mechanism: ray termination.** Each fly casts 1,442 rays per sample through
+`mj_multiRay`. In an empty ring those rays run to the wall or out to the 50-unit
+cutoff; in a furnished one many hit a crate or table within millimetres and
+return. Clutter shortens rays, and ray casting dominates per-fly cost.
+
+Behaviour rules out the alternative: the fly travelled *further* with props
+(0.6-1.47 cm/s) than without (0.34-0.74 cm/s). More walking would predict more
+physics cost, not less, so the ray effect is swamping it.
+
+> Practical consequence: an empty arena is the *expensive* case, not the cheap
+> one. Benchmarks run in a bare ring overstate the cost of vision, and stripping
+> scenery to "speed things up" does the opposite.
+
+### Two earlier attempts at this, both wrong
+
+1. Mutating `env.obstacles` mid-session and re-measuring -- measures sensing and
+   rendering only, since physics geoms are already baked.
+2. Reading the resulting negative cost as a `rebuildEnv()` GC artefact. It was
+   not an artefact; it was this effect showing through, and the dismissal was
+   wrong. The clean cross-load design reproduced it at ~1% variance.
