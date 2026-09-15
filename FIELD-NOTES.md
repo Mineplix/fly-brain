@@ -1904,3 +1904,68 @@ physics cost, not less, so the ray effect is swamping it.
 2. Reading the resulting negative cost as a `rebuildEnv()` GC artefact. It was
    not an artefact; it was this effect showing through, and the dismissal was
    wrong. The clean cross-load design reproduced it at ~1% variance.
+
+---
+
+## 27. The fly ramp, re-run in the furnished arena
+
+Section 26 showed clutter buys throughput, so the old ceiling -- measured in a
+nearly bare ring -- was pessimistic. Re-ran the ramp with all 56 obstacles.
+
+Protocol: one page load, flies added one at a time (addFly bakes the CURRENT
+env.obstacles into each new world, so late arrivals get the full set), adaptive
+resolution pinned off, two discarded warm windows then two 20 s measurement
+windows per point.
+
+    flies   per-fly    aggregate   window spread
+      1     0.02254     0.02254       1.7%
+      2     0.00911     0.01822       1.9%
+      3     0.00787     0.02361       2.7%
+      4     0.01790     0.07159        14%
+      5     0.01428     0.07139       2.2%
+      6     0.00869     0.05214       3.2%
+
+### What is solid
+
+**Aggregate throughput peaks around 4-5 flies (~0.072 sim-s/s) and 6 flies is
+still well above anything in the 1-3 range.** The furnished arena comfortably
+supports the 6-fly cap; nothing here argues for lowering it.
+
+### What is NOT solid, and should not be quoted
+
+- **The jump at 4 flies.** Per-fly rate rises from 0.0079 (3 flies) to 0.0179
+  (4), and aggregate triples. Adding one fly cannot make each fly twice as fast.
+  It reproduced across two independent runs, so it is not noise, but it is
+  unexplained.
+- **The 1 -> 2 drop.** Aggregate *falls* from 0.0225 to 0.0182 on adding a
+  second fly. Also unexplained.
+- **Run-to-run drift.** Six flies measured 0.0521 in the ramp and 0.0404 twenty
+  minutes later at identical settings -- ~25%, which exceeds several of the
+  gaps between adjacent points. The fine structure of the curve is therefore not
+  meaningful; only the coarse shape is.
+
+### A hypothesis tested and refuted
+
+The obvious explanation for a low-fly-count anomaly is that the render loop
+competes with the workers: few flies -> high fps -> less CPU for simulation.
+Tested by shrinking the render target to 16x16 with six flies, making drawing
+nearly free:
+
+    normal canvas   0.04042
+    16x16 canvas    0.03939      ratio 0.97
+
+**3% difference. Rendering is not competing with the workers**, and the
+hypothesis is wrong. Pinning the resolution scaler earlier was still worth doing
+-- it removed a variable -- but it was not the cause either.
+
+> Two confounds found and removed along the way, both of which had silently
+> corrupted the first attempt: the adaptive resolution scaler changing render
+> load between conditions, and measurement windows overlapping fly creation.
+> Neither explained the jump.
+
+### What a trustworthy ramp needs
+
+The remaining variance is environmental -- this pane throttles hard when not
+foregrounded (section 24) and drifts ~25% between runs. A ramp worth quoting
+needs a headless harness outside the preview pane, several repeats per point in
+randomised order, and the per-point spread reported alongside the mean.
