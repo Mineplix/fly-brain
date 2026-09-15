@@ -2,7 +2,10 @@
 // obstacles and food discs, and kinematic (mocap) proxies standing in for the other flies.
 // Units follow flybody: cm, g, s. The floor is z = 0; a standing fly's thorax sits at z ~ 0.13.
 export const DEFAULT_ENV = {
-  arena: { radius: 2.5, wallHeight: 1.2, segments: 48, wallFriction: 1 },    // head/body grip walls; legs slide along them (see buildWorldXML); tall enough to fly in
+  // shape: 'circle' uses `radius`; 'rect' uses `w`/`h` as HALF-extents. `radius` stays defined
+  // either way as the enclosing half-extent, because spawn points, the camera and the monster's
+  // wall clamp all use it as a scalar size.
+  arena: { shape: 'circle', radius: 2.5, wallHeight: 1.2, segments: 48, wallFriction: 1 },    // head/body grip walls; legs slide along them (see buildWorldXML); tall enough to fly in
   food: [
     { x: 1.0, y: 0.6, r: 0.25, sugar: 1.0, bitter: 0, water: 0.2, amount: 5 },
   ],
@@ -40,13 +43,22 @@ export const PRESETS = {
 };
 export function buildWorldXML(flyXML, env, { flyPos = [0, 0, 0.13], flyYaw = 0, nProxies = 0 } = {}) {
   const a = env.arena, parts = [];
-  parts.push(`<geom name="floor" type="plane" size="${a.radius + 1} ${a.radius + 1} .1" rgba=".55 .5 .42 1" friction="1" solref="0.0002 1" group="0"/>`);
-  // circular wall from box segments
-  const n = a.segments, t = 0.05;
-  for (let k = 0; k < n; k++) {
-    const th = (k + 0.5) / n * 2 * Math.PI, len = 2 * Math.PI * a.radius / n * 0.55;
-    const x = (a.radius + t) * Math.cos(th), y = (a.radius + t) * Math.sin(th);
-    parts.push(`<geom name="wall${k}" type="box" size="${t} ${len.toFixed(4)} ${a.wallHeight / 2}" pos="${x.toFixed(4)} ${y.toFixed(4)} ${a.wallHeight / 2}" euler="0 0 ${th.toFixed(4)}" rgba=".35 .35 .38 1" group="0" contype="2" conaffinity="2" friction="${a.wallFriction ?? 0.1}"/>`);
+  const W = a.shape === 'rect' ? a.w : a.radius, H = a.shape === 'rect' ? a.h : a.radius;
+  parts.push(`<geom name="floor" type="plane" size="${W + 1} ${H + 1} .1" rgba=".55 .5 .42 1" friction="1" solref="0.0002 1" group="0"/>`);
+  const t = 0.05, wf = a.wallFriction ?? 0.1, wh = a.wallHeight;
+  const wall = (k, sx, sy, x, y, yaw) => parts.push(`<geom name="wall${k}" type="box" size="${sx} ${sy} ${wh / 2}" pos="${x.toFixed(4)} ${y.toFixed(4)} ${wh / 2}" euler="0 0 ${yaw.toFixed(4)}" rgba=".35 .35 .38 1" group="0" contype="2" conaffinity="2" friction="${wf}"/>`);
+  if (wh <= 0) { /* open ground: no wall at all, the fly can walk off the edge */ }
+  else if (a.shape === 'rect') {
+    // four slabs. Cheaper than 48 segments and it gives the flies corners, which a circle never
+    // does -- a corner is a different navigational problem from a curve.
+    wall(0, t, H + t, W + t, 0, 0); wall(1, t, H + t, -(W + t), 0, 0);
+    wall(2, W + t, t, 0, H + t, 0);  wall(3, W + t, t, 0, -(H + t), 0);
+  } else {
+    const n = a.segments;
+    for (let k = 0; k < n; k++) {
+      const th = (k + 0.5) / n * 2 * Math.PI, len = 2 * Math.PI * a.radius / n * 0.55;
+      wall(k, t, +len.toFixed(4), (a.radius + t) * Math.cos(th), (a.radius + t) * Math.sin(th), th);
+    }
   }
   // Obstacles may optionally be raised (o.z = height of the underside, default 0) and rotated
   // about the vertical (o.yaw radians, boxes only) -- needed for spiral staircase treads.

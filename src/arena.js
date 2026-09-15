@@ -90,18 +90,46 @@ const LOOKS = {
   dungeon: { floorA: '#2b2722', floorB: '#4a443b', wallA: '#1e1c22', wallB: '#38343c',
              prop: ['#5b5348', '#6b6257', '#43403a', '#514a40'],
              bunting: null, food: '#c9a227', sky: '#07070a',
-             tent: false, stair: null,
+             tent: false, stair: null, stage: 'dungeon', floor: 'slab', floorTile: 1.1, wall: 'blocks',
              albedo: { floorLo: 0.10, floorHi: 0.26, wallLo: 0.06, wallHi: 0.16 } },
   cavern:  { floorA: '#1d2b2a', floorB: '#30443f', wallA: '#14201f', wallB: '#24332f',
              prop: ['#3d5a52', '#2f4a44', '#4a6b5e'],
              bunting: null, food: '#7fe3c0', sky: '#04090b',
-             tent: false, stair: null,
+             tent: false, stair: null, stage: 'cavern', floor: 'mottle', floorTile: 0.9, wall: 'solid',
              albedo: { floorLo: 0.07, floorHi: 0.22, wallLo: 0.04, wallHi: 0.13 } },
   lab2:    { floorA: '#d8dce3', floorB: '#eef1f6', wallA: '#aeb6c2', wallB: '#ccd3dc',
              prop: ['#7f8c9b', '#9aa7b6'],
              bunting: null, food: '#ffd84d', sky: '#dfe5ee',
              tent: false, stair: null,
              albedo: { floorLo: 0.72, floorHi: 0.91, wallLo: 0.45, wallHi: 0.68 } },
+  // ---- places Janus can send them. Albedos are Rec.709 luma of the colours above, /255, the
+  // same convention the original four follow -- so a beach really is blinding to a fly and hell
+  // really is near-dark, rather than being a repaint of the same reflectances.
+  beach:   { floorA: '#cbb47e', floorB: '#e8d9a8', wallA: '#2f7fbf', wallB: '#7fd0f0',
+             prop: ['#e8d9a8', '#c9b48a', '#ff8a2b', '#21c8e4'],
+             bunting: null, food: '#ffd84d', sky: '#bfe4f5',
+             tent: false, stair: null, stage: 'dunes', floor: 'speckle', floorTile: 0.5, wall: 'gradient',
+             albedo: { floorLo: 0.710, floorHi: 0.850, wallLo: 0.449, wallHi: 0.757 } },
+  field:   { floorA: '#4a7a35', floorB: '#7cb04f', wallA: '#8fbfe0', wallB: '#cfe9f7',
+             prop: ['#6b4a2a', '#8a5a33', '#4f7a3a', '#c8d94a'],
+             bunting: null, food: '#ffe66d', sky: '#a8d8f0',
+             tent: false, stair: null, stage: 'meadow', floor: 'mottle', floorTile: 0.6, wall: 'gradient',
+             albedo: { floorLo: 0.419, floorHi: 0.619, wallLo: 0.718, wallHi: 0.896 } },
+  course:  { floorA: '#222831', floorB: '#e8eaed', wallA: '#1b2430', wallB: '#f6c624',
+             prop: ['#f6c624', '#e02128', '#21c8e4', '#9ae62c'],
+             bunting: null, food: '#ffd84d', sky: '#101722',
+             tent: false, stair: null, stage: 'gauntlet', floor: 'checker', floorTile: 0.55, wall: 'solid',
+             albedo: { floorLo: 0.154, floorHi: 0.917, wallLo: 0.137, wallHi: 0.771 } },
+  heaven:  { floorA: '#efeade', floorB: '#ffffff', wallA: '#e3dcc4', wallB: '#fdfaf0',
+             prop: ['#ffe9a8', '#ffffff', '#dfe9ff', '#f7e7b0'],
+             bunting: null, food: '#ffe9a8', sky: '#eaf2ff',
+             tent: false, stair: null, stage: 'clouds', floor: 'soft', floorTile: 1.6, wall: 'gradient',
+             albedo: { floorLo: 0.918, floorHi: 1.000, wallLo: 0.862, wallHi: 0.980 } },
+  hell:    { floorA: '#1a0a08', floorB: '#5a1a12', wallA: '#0e0604', wallB: '#7a1d10',
+             prop: ['#ff4a1e', '#8e1118', '#3a1008', '#c2410c'],
+             bunting: null, food: '#ff8a2b', sky: '#12050a',
+             tent: false, stair: null, stage: 'brimstone', floor: 'cracked', floorTile: 0.9, wall: 'blocks',
+             albedo: { floorLo: 0.052, floorHi: 0.153, wallLo: 0.030, wallHi: 0.188 } },
 };
 let LOOK = LOOKS[THEME] || LOOKS.circus;
 // Ringmaster: narrates the flies and restages the arena between "adventures". On by default
@@ -111,16 +139,10 @@ let LOOK = LOOKS[THEME] || LOOKS.circus;
 const RM_FLAG = new URLSearchParams(location.search).get('ringmaster');
 const RINGMASTER = RM_FLAG === '1' || (RM_FLAG !== '0' && THEME === 'circus');
 const env = PRESET.env();
-// The staircase is a real obstacle, not scenery. Pushing its treads into env.obstacles means
-// world.js builds collision geoms, clearance() senses them, and the eye rays hit them -- all
-// from one definition, because env is what gets sent to every worker.
-if (LOOK.stair) env.obstacles.push(...spiralStaircase(LOOK.stair));
-// ?props=0 stages the ring with the staircase alone. Obstacles are baked into each fly's
-// MuJoCo model by buildWorldXML at creation, so their cost can only be compared across separate
-// page loads -- mutating env.obstacles afterwards changes sensing and the render, not physics.
+// ?props=0 stages the ring with the staircase alone. Obstacles are baked into each fly's MuJoCo
+// model by buildWorldXML at creation, so their cost can only be compared across separate page
+// loads -- mutating env.obstacles afterwards changes sensing and the render, not physics.
 const PROPS_ON = new URLSearchParams(location.search).get('props') !== '0';
-if (LOOK.props && PROPS_ON) env.obstacles.push(...carnivalProps(LOOK));
-if (LOOK.props && PROPS_ON) env.obstacles.push(...wallProps(LOOK, env.arena.radius, env.arena.wallHeight));
 /** 16 raised, rotated treads around a newel post: 30 degrees and 0.062 cm per step (~1.33 turns, ~1 cm tall). */
 function spiralStaircase({ x, y, color, pole, dais }) {
   const N = 22, rise = 0.062, turn = Math.PI / 6, rHelix = 0.34, out = [];
@@ -193,6 +215,151 @@ function wallProps(look, radius, wallHeight) {
   return out;
 }
 
+/**
+ * What each place is made of. A stage sets BOTH the furniture and the conditions, because a
+ * location the flies only see is scenery -- a beach should be humid and bright, hell should be
+ * hot and near-dark, and those reach the animal through hygrosensory, thermosensory and
+ * photoreceptor channels that already exist.
+ *
+ * Obstacles are baked into each fly's MuJoCo model when the fly is built, so switching stage
+ * goes through relocate(), which rebuilds the flies carrying their learned weights across.
+ */
+const STAGES = {
+  // the big top, as before
+  carnival(env, look) {
+    Object.assign(env.arena, { shape: 'circle', radius: 2.5, wallHeight: 1.2 });
+    env.obstacles.push(...spiralStaircase({ x: -0.15, y: -0.15, color: '#e02128', pole: '#8e1118', dais: '#f6c624' }));
+    env.obstacles.push(...carnivalProps(look), ...wallProps(look, env.arena.radius, env.arena.wallHeight));
+    env.light.sky = 1; env.humidity = 0.45; env.wind = [0, 0];
+  },
+  // low dunes and a couple of rocks; damp, bright, a steady onshore breeze
+  dunes(env, look) {
+    // a wide shallow shore: the wall drops to a dune ridge you can see over
+    Object.assign(env.arena, { shape: 'circle', radius: 3.2, wallHeight: 0.35 });
+    const P = look.prop;
+    [[1.3, 0.9, 0.34], [-1.5, 0.6, 0.28], [0.4, -1.6, 0.40], [-0.9, -1.2, 0.24], [1.7, -0.9, 0.30]]
+      .forEach(([x, y, r], i) => env.obstacles.push({ type: 'cylinder', x, y, r, sz: 0.06 + 0.04 * (i % 3), color: P[i % P.length] }));
+    [[0.9, 0.2], [-0.3, 1.5]].forEach(([x, y], i) =>
+      env.obstacles.push({ type: 'box', x, y, sx: 0.16, sy: 0.13, sz: 0.22, yaw: i, color: P[1] }));
+    env.light.sky = 1.4; env.humidity = 0.85; env.wind = [7, 2];
+    env.food = [{ x: 1.5, y: 1.4, r: 0.28, sugar: 1, bitter: 0, water: 0.9, amount: 6 }];
+    env.odors = [{ x: 1.5, y: 1.4, odor: 'vinegar', strength: 0.9, sigma: 1.2 }];
+    env.hazards = []; env.bitterPatches = [];
+  },
+  // open grass: almost nothing to hide behind, which makes it the expensive case for vision
+  meadow(env, look) {
+    // genuinely open ground -- no wall at all. clearance() reports Infinity, so nothing is
+    // steering these flies but their own brains and the horizon.
+    Object.assign(env.arena, { shape: 'circle', radius: 4.0, wallHeight: 0 });
+    const P = look.prop;
+    for (let k = 0; k < 9; k++) {
+      const th = k * 2.4, r = 0.7 + (k % 3) * 0.5;
+      env.obstacles.push({ type: 'cylinder', x: r * Math.cos(th), y: r * Math.sin(th),
+        r: 0.02, sz: 0.5 + 0.25 * (k % 4), color: P[2] });          // grass stalks
+    }
+    env.light.sky = 1.25; env.humidity = 0.55; env.wind = [5, 3];
+    env.food = [{ x: -1.4, y: 1.2, r: 0.3, sugar: 1, bitter: 0, water: 0.4, amount: 8 }];
+    env.odors = [{ x: -1.4, y: 1.2, odor: 'vinegar', strength: 1, sigma: 1.5 }];
+    env.hazards = []; env.bitterPatches = [];
+  },
+  // a gauntlet: staggered walls to squeeze past, a climb, and the reward at the far end
+  gauntlet(env, look) {
+    // a corridor, not a ring: staggered baffles down a long rectangle, reward at the end
+    Object.assign(env.arena, { shape: 'rect', w: 1.1, h: 2.6, radius: 2.6, wallHeight: 1.0 });
+    const P = look.prop;
+    for (let k = 0; k < 5; k++) {
+      const y = -2.0 + k * 1.0, off = (k % 2) ? 0.42 : -0.42;   // leave a gap on alternating sides
+      env.obstacles.push({ type: 'box', x: off, y, sx: 0.66, sy: 0.06, sz: 0.55, color: P[k % P.length] });
+    }
+    for (let k = 0; k < 4; k++)                                  // a staircase of crates to climb
+      env.obstacles.push({ type: 'box', x: 0.72, y: 2.1, sx: 0.12, sy: 0.12, sz: 0.10 + k * 0.09,
+        z: k * 0.09, color: P[1] });
+    env.light.sky = 1; env.humidity = 0.45; env.wind = [0, 0];
+    env.food = [{ x: 0, y: 2.35, r: 0.22, sugar: 1, bitter: 0, water: 0.3, amount: 8 }];
+    env.odors = [{ x: 0, y: 2.35, odor: 'vinegar', strength: 1.4, sigma: 2.2 }];
+    env.hazards = []; env.bitterPatches = [];
+  },
+  // raised platforms, blinding light, food everywhere and nothing that hurts
+  clouds(env, look) {
+    // platforms over nothing: no wall, and the only solid ground above the floor
+    Object.assign(env.arena, { shape: 'circle', radius: 3.0, wallHeight: 0 });
+    const P = look.prop;
+    [[0, 0, 0.55], [1.4, 0.9, 0.42], [-1.4, 0.7, 0.36], [0.8, -1.4, 0.48], [-1.1, -1.2, 0.30]]
+      .forEach(([x, y, h], i) => {
+        env.obstacles.push({ type: 'cylinder', x, y, r: 0.045, sz: h, color: P[3] });
+        env.obstacles.push({ type: 'cylinder', x, y, r: 0.34, sz: 0.04, z: h, color: P[i % P.length] });
+      });
+    env.light.sky = 1.5; env.humidity = 0.5; env.wind = [0, 0];
+    env.food = ring(5, 1.5, (x, y) => ({ x, y, r: 0.26, sugar: 1, bitter: 0, water: 0.5, amount: 9 }));
+    env.odors = env.food.map(f => ({ x: f.x, y: f.y, odor: 'vinegar', strength: 0.8, sigma: 0.8 }));
+    env.hazards = []; env.bitterPatches = [];
+  },
+  // jagged rock, near-dark, hot floor between the safe ground. heat 0.5 is the damage threshold:
+  // full nociceptor drive without killing anything (FIELD-NOTES 21).
+  brimstone(env, look) {
+    // a pit: small and steep-sided, so there is nowhere far to run
+    Object.assign(env.arena, { shape: 'circle', radius: 1.8, wallHeight: 2.2 });
+    const P = look.prop;
+    for (let k = 0; k < 7; k++) {
+      const th = k * 0.92, r = 0.8 + (k % 3) * 0.45;
+      env.obstacles.push({ type: 'box', x: r * Math.cos(th), y: r * Math.sin(th),
+        sx: 0.12, sy: 0.10, sz: 0.30 + 0.18 * (k % 3), yaw: th, color: P[k % P.length] });
+    }
+    env.light.sky = 0.3; env.humidity = 0.12; env.wind = [2, -1];
+    env.hazards = ring(4, 1.3, (x, y) => ({ x, y, r: 0.38, heat: 0.5 }));
+    env.food = [{ x: 0, y: 0, r: 0.22, sugar: 1, bitter: 0, water: 0.2, amount: 5 }];
+    env.odors = [{ x: 0, y: 0, odor: 'vinegar', strength: 1, sigma: 0.9 }];
+    env.bitterPatches = [];
+  },
+  // the original underground rooms keep working
+  dungeon(env, look) {
+    // a square cell. A corner is a different navigational problem from a curve.
+    Object.assign(env.arena, { shape: 'rect', w: 1.9, h: 1.9, radius: 1.9, wallHeight: 1.6 });
+    env.obstacles.push(
+      { type: 'cylinder', x: -0.8, y: 0.9, r: 0.16, sz: 0.9, color: look.prop[0] },
+      { type: 'cylinder', x: 0.9, y: 0.8, r: 0.16, sz: 0.9, color: look.prop[1] },
+      { type: 'cylinder', x: -0.9, y: -0.8, r: 0.16, sz: 0.9, color: look.prop[2] },
+      { type: 'box', x: 0.4, y: -1.3, sx: 0.9, sy: 0.08, sz: 0.45, color: look.prop[3 % look.prop.length] });
+    env.light.sky = 0.35; env.humidity = 0.45; env.wind = [0, 0];
+    env.food = [{ x: 1.7, y: -1.5, r: 0.26, sugar: 1, bitter: 0, water: 0.3, amount: 6 }];
+    env.odors = [{ x: 1.7, y: -1.5, odor: 'vinegar', strength: 1.2, sigma: 1.3 }];
+    env.hazards = []; env.bitterPatches = [];
+  },
+  cavern(env, look) {
+    Object.assign(env.arena, { shape: 'rect', w: 2.6, h: 1.5, radius: 2.6, wallHeight: 1.1 });
+    env.obstacles.push(
+      { type: 'cylinder', x: 0.2, y: 1.2, r: 0.22, sz: 0.7, color: look.prop[0] },
+      { type: 'cylinder', x: -1.2, y: -0.3, r: 0.28, sz: 0.55, color: look.prop[1] });
+    env.light.sky = 0.28; env.humidity = 0.9; env.wind = [2, 1];
+    env.food = [{ x: -1.4, y: 1.3, r: 0.3, sugar: 1, bitter: 0, water: 0.9, amount: 6 }];
+    env.odors = [{ x: -1.4, y: 1.3, odor: 'vinegar', strength: 1, sigma: 1.4 }];
+    env.hazards = []; env.bitterPatches = [];
+  },
+};
+const ring = (n, r, f) => Array.from({ length: n }, (_, k) => {
+  const a = k / n * 2 * Math.PI; return f(r * Math.cos(a), r * Math.sin(a)); });
+
+/** Wipe the arena and build the named place into `env`. Does NOT move any fly -- see relocate(). */
+function stageInto(env, name) {
+  const look = LOOKS[name] || LOOKS[THEME] || LOOKS.circus;
+  env.obstacles = []; env.hazards = []; env.bitterPatches = [];
+  const fn = STAGES[look.stage || (name === 'circus' ? 'carnival' : null)];
+  if (fn) fn(env, look); else { env.light.sky = 1; env.humidity = 0.45; env.wind = [0, 0]; }
+  return look;
+}
+
+// ?where=<place> starts somewhere other than the theme's own staging: beach, field, course,
+// heaven, hell, dungeon, cavern. Janus can move them later with relocate().
+//
+// This runs HERE, below STAGES, and not up with the other flags: stageInto() is a hoisted
+// function declaration but STAGES is a const, so calling it any earlier throws a ReferenceError
+// from the temporal dead zone -- which breaks the whole page before it loads anything.
+const WHERE_RAW = new URLSearchParams(location.search).get('where');
+const WHERE = LOOKS[WHERE_RAW] ? WHERE_RAW : null;
+if (WHERE) { LOOK = LOOKS[WHERE]; stageInto(env, WHERE); }
+else if (PROPS_ON) stageInto(env, THEME);
+else if (LOOK.stair) env.obstacles.push(...spiralStaircase(LOOK.stair));   // bare ring, for benchmarks
+
 const flies = [];          // {id, worker, group, bodies[], last, color, ready}
 let mushroom = null;
 let flyvisMap, shared, meta, bodymap, flyXML, gait, visual, batches, outputPass, running = false, selected = 0, tool = 'none', speed = 2, brainMem, wasmModule, brainParams, neuromodCalib;
@@ -252,7 +419,7 @@ async function main() {
   startAutosave();
   startOrbTicker();
   if (PRESET.autoThreat) setInterval(() => { if (!running || !flies.length) return; const live = flies.filter(f => f.last?.alive !== false); if (!live.length) return; selected = live[Math.floor(Math.random() * live.length)].id; launchThreat(); }, PRESET.autoThreat * 1000);
-  window.__arena = { camera, controls, flies, env, THREE, renderer, scene, gtao, composer, metrics, resolution, batches, visual, addFly, removeFly, renameFly, rebuildEnv, launchThreat, janusSpeak, setLook, LOOKS, theme: THEME, releaseMonster, recallMonster, store, saveAllFlies, saveFlyRecord, PERSIST, FLY_CAP, MAX_FLIES,
+  window.__arena = { camera, controls, flies, env, THREE, renderer, scene, gtao, composer, metrics, resolution, batches, visual, addFly, removeFly, renameFly, rebuildEnv, launchThreat, janusSpeak, setLook, LOOKS, relocate, stageInto, theme: THEME, releaseMonster, recallMonster, store, saveAllFlies, saveFlyRecord, PERSIST, FLY_CAP, MAX_FLIES,
     orbDebug: () => ({ presence: orbPresence, glow: orbGlow, until: orbUntil, now: performance.now(), out: orbWasOut, spokeAt: orbSpokeAt }) };
   animate();
   if (RINGMASTER) {
@@ -266,7 +433,7 @@ async function main() {
 }
 
 // ---------------- scene ----------------
-let renderer, scene, camera, controls, envGroup, raycaster, floorMesh, sun, composer, gtao, resolution;
+let renderer, scene, camera, controls, envGroup, raycaster, floorMesh, sun, hemi, rimLight, composer, gtao, resolution;
 let shadowDirty = true, lastShadow = -Infinity, shadowExtent = 0, lastBrainDraw = 0, brainDirty = true;
 let brainColorFly = -1, brainColorHover = -2;
 const shadowCenter = new THREE.Vector3(Infinity, Infinity, Infinity), viewPoint = new THREE.Vector3();
@@ -289,17 +456,17 @@ function buildScene(data) {
   camera.position.set(-1.2, -1.6, 1.3);
   controls = new OrbitControls(camera, renderer.domElement); controls.enableDamping = true; controls.target.set(0, 0, 0.1);
   controls.minDistance = 0.16; controls.maxDistance = env.arena.radius * 5;
-  // Big-top lighting is flat and bright: a carnival is lit to be legible, not dramatic. The
-  // circus theme therefore gets much stronger ambient fill so the saturated primaries read at
-  // full strength instead of sinking into shadow; 'lab' and the underground looks keep the
-  // original moody key. This is render-only -- the flies' albedos are unchanged, so brightening
-  // the set for us does NOT quietly change what the photoreceptors are handed.
-  const carnival = THEME === 'circus';
-  scene.add(new THREE.HemisphereLight('#ffffff', carnival ? '#6b6f86' : '#514432', carnival ? 0.85 : 0.22));
-  sun = new THREE.DirectionalLight(carnival ? '#ffffff' : '#fff1da', carnival ? 1.9 : 2.7); sun.position.set(3, 2, 8); sun.castShadow = true;
+  // Lighting belongs to the PLACE, not to the app: a big top is flat and bright, a pit is dark
+  // and red, a beach is blown out. applyLighting() is re-run whenever the place changes.
+  // Render-only -- the flies' albedo blocks are untouched, so lighting the set for us never
+  // quietly changes what the photoreceptors are handed.
+  hemi = new THREE.HemisphereLight('#ffffff', '#6b6f86', 0.85);
+  scene.add(hemi);
+  sun = new THREE.DirectionalLight('#ffffff', 1.9); sun.position.set(3, 2, 8); sun.castShadow = true;
   sun.shadow.mapSize.set(2048, 2048); sun.shadow.bias = -0.00002; sun.shadow.normalBias = 0.0003; sun.shadow.radius = 2;
   Object.assign(sun.shadow.camera, { left: -4, right: 4, top: 4, bottom: -4, near: 0.1, far: 20 }); scene.add(sun, sun.target);
-  const rim = new THREE.DirectionalLight(carnival ? '#ffffff' : '#f9e5c4', carnival ? 1.0 : 0.65); rim.position.set(-3, -2, 3); scene.add(rim);
+  rimLight = new THREE.DirectionalLight('#ffffff', 1.0); rimLight.position.set(-3, -2, 3); scene.add(rimLight);
+  applyLighting(LOOK);
   const rt = new THREE.WebGLRenderTarget(1, 1, { type: THREE.HalfFloatType, samples: 4 });
   composer = new EffectComposer(renderer, rt); composer.addPass(new RenderPass(scene, camera));
   gtao = new GTAOPass(scene, camera, 1, 1);
@@ -432,25 +599,156 @@ function drawStack() {
 }
 let pd = null;
 function discMesh(r, color, opacity = 1, z = 0.0015) { const m = new THREE.Mesh(new THREE.CircleGeometry(r, 48), new THREE.MeshStandardMaterial({ color, transparent: opacity < 1, opacity, roughness: 0.8 })); m.position.z = z; m.receiveShadow = true; return m; }
+/**
+ * Ground texture. A checkerboard is a circus floor; a beach is not tiled and a cavern is not
+ * either. `floorA`/`floorB` stay the two extremes whatever the pattern, so the albedo block the
+ * flies are handed still brackets what is drawn -- the pattern changes the arrangement, not the
+ * reflectance range.
+ */
+function floorTexture(look) {
+  const cv = document.createElement('canvas'); cv.width = cv.height = 128;
+  const x = cv.getContext('2d'), A = look.floorA, B = look.floorB;
+  const rnd = (seed => () => (seed = seed * 1664525 + 1013904223 >>> 0) / 4294967296)(7);
+  switch (look.floor || 'checker') {
+    case 'speckle':      // sand: base tone, grains of the other
+      x.fillStyle = B; x.fillRect(0, 0, 128, 128);
+      x.fillStyle = A;
+      for (let i = 0; i < 2600; i++) x.fillRect(rnd() * 128 | 0, rnd() * 128 | 0, 1, 1);
+      x.globalAlpha = 0.35;
+      for (let i = 0; i < 40; i++) { x.beginPath(); x.ellipse(rnd() * 128, rnd() * 128, 6 + rnd() * 14, 2 + rnd() * 4, rnd() * 3.14, 0, 6.283); x.fill(); }
+      x.globalAlpha = 1;
+      break;
+    case 'mottle':       // grass, rock: irregular patches, no grid
+      x.fillStyle = A; x.fillRect(0, 0, 128, 128);
+      for (let i = 0; i < 260; i++) {
+        x.fillStyle = rnd() < 0.5 ? B : A; x.globalAlpha = 0.25 + rnd() * 0.6;
+        x.beginPath(); x.ellipse(rnd() * 128, rnd() * 128, 3 + rnd() * 13, 3 + rnd() * 9, rnd() * 3.14, 0, 6.283); x.fill();
+      }
+      x.globalAlpha = 1;
+      break;
+    case 'slab':         // flagstones: big blocks with mortar lines, offset per row
+      x.fillStyle = A; x.fillRect(0, 0, 128, 128);
+      x.fillStyle = B;
+      for (let r = 0; r < 4; r++) for (let c = 0; c < 4; c++)
+        x.fillRect(c * 32 + (r % 2 ? 16 : 0) + 1.5, r * 32 + 1.5, 29, 29);
+      break;
+    case 'soft':         // heaven: almost uniform, the faintest drift
+      x.fillStyle = B; x.fillRect(0, 0, 128, 128);
+      x.fillStyle = A; x.globalAlpha = 0.25;
+      for (let i = 0; i < 26; i++) { x.beginPath(); x.ellipse(rnd() * 128, rnd() * 128, 14 + rnd() * 30, 10 + rnd() * 22, 0, 0, 6.283); x.fill(); }
+      x.globalAlpha = 1;
+      break;
+    case 'cracked':      // hell: dark ground split by glowing seams
+      x.fillStyle = A; x.fillRect(0, 0, 128, 128);
+      x.strokeStyle = B; x.lineWidth = 2.2;
+      for (let i = 0; i < 9; i++) {
+        x.beginPath(); let px = rnd() * 128, py = rnd() * 128; x.moveTo(px, py);
+        for (let k = 0; k < 5; k++) { px += (rnd() - 0.5) * 46; py += (rnd() - 0.5) * 46; x.lineTo(px, py); }
+        x.stroke();
+      }
+      break;
+    default:             // checker: the big top
+      for (let i = 0; i < 2; i++) for (let j = 0; j < 2; j++) {
+        x.fillStyle = ((i + j) & 1) ? B : A; x.fillRect(i * 64, j * 64, 64, 64);
+      }
+  }
+  return cv;
+}
+
+/** Wall texture. Vertical stripes are a big top; masonry, sea and sky are not. */
+function wallTexture(look) {
+  const cv = document.createElement('canvas'); cv.width = 1024; cv.height = 64;
+  const x = cv.getContext('2d'), A = look.wallA, B = look.wallB;
+  const rnd = (seed => () => (seed = seed * 1103515245 + 12345 >>> 0) / 4294967296)(11);
+  switch (look.wall || 'stripes') {
+    case 'gradient': {   // sea or sky: a band that darkens downward
+      const g = x.createLinearGradient(0, 0, 0, 64);
+      g.addColorStop(0, B); g.addColorStop(1, A); x.fillStyle = g; x.fillRect(0, 0, 1024, 64);
+      x.globalAlpha = 0.16; x.fillStyle = B;                       // a little swell
+      for (let i = 0; i < 90; i++) x.fillRect(rnd() * 1024, 26 + rnd() * 34, 12 + rnd() * 40, 1.5);
+      x.globalAlpha = 1;
+      break;
+    }
+    case 'blocks': {     // masonry, courses offset row to row
+      x.fillStyle = A; x.fillRect(0, 0, 1024, 64);
+      for (let r = 0; r < 4; r++) for (let c = 0; c < 32; c++) {
+        x.fillStyle = rnd() < 0.5 ? B : A;
+        x.globalAlpha = 0.55 + rnd() * 0.45;
+        x.fillRect(c * 32 + (r % 2 ? 16 : 0) + 1, r * 16 + 1, 30, 14);
+      }
+      x.globalAlpha = 1;
+      break;
+    }
+    case 'solid':
+      x.fillStyle = A; x.fillRect(0, 0, 1024, 64);
+      x.globalAlpha = 0.2; x.fillStyle = B;
+      for (let i = 0; i < 60; i++) x.fillRect(rnd() * 1024, rnd() * 64, 20 + rnd() * 60, 3);
+      x.globalAlpha = 1;
+      break;
+    default:             // stripes
+      for (let k = 0; k < 24; k++) { x.fillStyle = (k & 1) ? B : A; x.fillRect(k * 1024 / 24, 0, 1024 / 24 + 1, 64); }
+  }
+  return cv;
+}
+
+// sky tint, ground bounce, fill strength, key strength, rim strength
+const LIGHTS = {
+  circus:  { sky: '#ffffff', ground: '#6b6f86', fill: 0.85, key: 1.9,  rim: 1.00, keyCol: '#ffffff', rimCol: '#ffffff' },
+  beach:   { sky: '#ffffff', ground: '#d9c9a0', fill: 1.25, key: 2.6,  rim: 0.85, keyCol: '#fff6e0', rimCol: '#cfe8ff' },
+  field:   { sky: '#eaf6ff', ground: '#6f9a4a', fill: 1.00, key: 2.3,  rim: 0.70, keyCol: '#fff8e6', rimCol: '#cfe8ff' },
+  course:  { sky: '#ffffff', ground: '#2a3340', fill: 0.60, key: 2.2,  rim: 0.90, keyCol: '#ffffff', rimCol: '#f6c624' },
+  heaven:  { sky: '#ffffff', ground: '#e8eeff', fill: 1.45, key: 1.6,  rim: 1.20, keyCol: '#fffdf4', rimCol: '#e8f0ff' },
+  hell:    { sky: '#3a1008', ground: '#6b1408', fill: 0.55, key: 0.85, rim: 0.75, keyCol: '#ff5a2a', rimCol: '#ff2d10' },
+  dungeon: { sky: '#8fa0b8', ground: '#2a2620', fill: 0.35, key: 1.5,  rim: 0.45, keyCol: '#ffe6b8', rimCol: '#7fa8d8' },
+  cavern:  { sky: '#9fd8cc', ground: '#16201f', fill: 0.35, key: 1.2,  rim: 0.50, keyCol: '#cfeee2', rimCol: '#4f8f7f' },
+  lab:     { sky: '#f4f2ed', ground: '#514432', fill: 0.22, key: 2.7,  rim: 0.65, keyCol: '#fff1da', rimCol: '#f9e5c4' },
+  lab2:    { sky: '#ffffff', ground: '#c9d2dd', fill: 1.10, key: 2.0,  rim: 0.80, keyCol: '#ffffff', rimCol: '#ffffff' },
+};
+/** Point the rig at a place. Called at build and on every relocation. */
+function applyLighting(look) {
+  const name = Object.keys(LOOKS).find(k => LOOKS[k] === look) || THEME;
+  const L = LIGHTS[name] || LIGHTS.circus;
+  if (hemi) { hemi.color.set(L.sky); hemi.groundColor.set(L.ground); hemi.intensity = L.fill; }
+  if (sun) { sun.color.set(L.keyCol); sun.intensity = L.key; }
+  if (rimLight) { rimLight.color.set(L.rimCol); rimLight.intensity = L.rim; }
+  shadowDirty = true;
+}
+
 function rebuildEnv() {
   // Placement rebuilds own their resources; release old GPU buffers/textures before replacing them.
   envGroup.traverse(o => { if (o.isMesh) { o.geometry.dispose(); o.material.map?.dispose(); o.material.dispose(); } });
   envGroup.clear(); shadowDirty = true;
-  const R = env.arena.radius;
+  const A = env.arena, rect = A.shape === 'rect';
+  const W = rect ? A.w : A.radius, H = rect ? A.h : A.radius, R = A.radius, wh = A.wallHeight;
   // floor: same 0.4 cm checker the flies' eyes see
-  const cv = document.createElement('canvas'); cv.width = cv.height = 64; const cx = cv.getContext('2d');
-  for (let i = 0; i < 2; i++) for (let j = 0; j < 2; j++) { cx.fillStyle = ((i + j) & 1) ? LOOK.floorB : LOOK.floorA; cx.fillRect(i * 32, j * 32, 32, 32); }
-  const tex = new THREE.CanvasTexture(cv); tex.wrapS = tex.wrapT = THREE.RepeatWrapping; tex.repeat.set((R + 0.2) * 2 / 0.8, (R + 0.2) * 2 / 0.8); tex.magFilter = THREE.LinearFilter; tex.anisotropy = Math.min(8, renderer.capabilities.getMaxAnisotropy()); tex.colorSpace = THREE.SRGBColorSpace;
-  floorMesh = new THREE.Mesh(new THREE.CircleGeometry(R + 0.1, 96), new THREE.MeshStandardMaterial({ map: tex, roughness: 0.95 }));
+  const cv = floorTexture(LOOK); const cx = cv.getContext('2d');
+  const tex = new THREE.CanvasTexture(cv); tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+  const tile = LOOK.floorTile ?? 0.8;
+  tex.repeat.set((W + 0.2) * 2 / tile, (H + 0.2) * 2 / tile);
+  tex.magFilter = THREE.LinearFilter; tex.anisotropy = Math.min(8, renderer.capabilities.getMaxAnisotropy()); tex.colorSpace = THREE.SRGBColorSpace;
+  floorMesh = new THREE.Mesh(
+    rect ? new THREE.PlaneGeometry((W + 0.1) * 2, (H + 0.1) * 2) : new THREE.CircleGeometry(R + 0.1, 96),
+    new THREE.MeshStandardMaterial({ map: tex, roughness: 0.95 }));
   floorMesh.receiveShadow = true; envGroup.add(floorMesh);
   // striped wall (24 stripes), matching the visual environment used for the compound eye
-  const wc = document.createElement('canvas'); wc.width = 1024; wc.height = 8; const wx = wc.getContext('2d');
-  for (let k = 0; k < 24; k++) { wx.fillStyle = (k & 1) ? LOOK.wallB : LOOK.wallA; wx.fillRect(k * 1024 / 24, 0, 1024 / 24 + 1, 8); }
-  const wt = new THREE.CanvasTexture(wc); wt.colorSpace = THREE.SRGBColorSpace;
-  const wall = new THREE.Mesh(new THREE.CylinderGeometry(R + 0.05, R + 0.05, env.arena.wallHeight, 96, 1, true), new THREE.MeshStandardMaterial({ map: wt, side: THREE.BackSide, roughness: 0.9 }));
-  wall.rotation.x = Math.PI / 2; wall.position.z = env.arena.wallHeight / 2; envGroup.add(wall);
-  if (LOOK.bunting) addBunting(R, env.arena.wallHeight);
-  if (LOOK.tent) addTentCeiling(R, env.arena.wallHeight);
+  if (wh > 0) {
+    const wt = new THREE.CanvasTexture(wallTexture(LOOK)); wt.colorSpace = THREE.SRGBColorSpace;
+    if (rect) {
+      const mat = new THREE.MeshStandardMaterial({ map: wt, side: THREE.BackSide, roughness: 0.9 });
+      const sides = [[W * 2, 0, H, 0], [W * 2, 0, -H, Math.PI], [H * 2, W, 0, -Math.PI / 2], [H * 2, -W, 0, Math.PI / 2]];
+      for (const [len, x, y, rot] of sides) {
+        const m = new THREE.Mesh(new THREE.PlaneGeometry(len, wh), mat);
+        m.position.set(x, y, wh / 2); m.rotation.set(Math.PI / 2, 0, rot, 'ZXY');
+        m.lookAt(0, 0, wh / 2); m.rotateX(Math.PI / 2);
+        envGroup.add(m);
+      }
+    } else {
+      const wall = new THREE.Mesh(new THREE.CylinderGeometry(R + 0.05, R + 0.05, wh, 96, 1, true), new THREE.MeshStandardMaterial({ map: wt, side: THREE.BackSide, roughness: 0.9 }));
+      wall.rotation.x = Math.PI / 2; wall.position.z = wh / 2; envGroup.add(wall);
+    }
+  }
+  if (LOOK.bunting && !rect) addBunting(R, wh);
+  if (LOOK.tent && !rect) addTentCeiling(R, wh);
   for (const [i, o] of env.obstacles.entries()) { const m = new THREE.Mesh(o.type === 'box' ? new THREE.BoxGeometry(o.sx * 2, o.sy * 2, o.sz) : new THREE.CylinderGeometry(o.r, o.r, o.sz, 32), new THREE.MeshStandardMaterial({ color: o.color || LOOK.prop[i % LOOK.prop.length], roughness: 0.45, metalness: 0.05 }));
     if (o.type !== 'box') m.rotation.x = Math.PI / 2; else if (o.yaw) m.rotation.z = o.yaw;
     m.position.set(o.x, o.y, (o.z || 0) + o.sz / 2); m.castShadow = m.receiveShadow = true; envGroup.add(m); }
@@ -459,8 +757,14 @@ function rebuildEnv() {
   for (const h of env.hazards) { const m = discMesh(h.r, '#d9502f', 0.9); m.position.set(h.x, h.y, 0.002); envGroup.add(m); const glow = discMesh(h.r + 0.4, '#d9502f', 0.12, 0.001); glow.position.set(h.x, h.y, 0.001); envGroup.add(glow); }
   for (const o of env.odors) { // plume as a soft radial gradient
     const g = document.createElement('canvas'); g.width = g.height = 128; const gx = g.getContext('2d'); const grd = gx.createRadialGradient(64, 64, 0, 64, 64, 64);
-    const col = o.odor === 'co2' ? '120,200,255' : '190,255,120'; grd.addColorStop(0, `rgba(${col},0.45)`); grd.addColorStop(1, `rgba(${col},0)`); gx.fillStyle = grd; gx.fillRect(0, 0, 128, 128);
-    const m = new THREE.Mesh(new THREE.CircleGeometry(o.sigma * 2.2, 48), new THREE.MeshBasicMaterial({ map: new THREE.CanvasTexture(g), transparent: true, depthWrite: false }));
+    // Faint, and never larger than the ground it sits on. At 0.45 alpha and sigma*2.2 this
+    // overlay covered an entire small arena in green -- it read as the floor colour rather than
+    // as a plume, and cost real time to diagnose twice.
+    const col = o.odor === 'co2' ? '120,200,255' : '190,255,120';
+    grd.addColorStop(0, `rgba(${col},0.18)`); grd.addColorStop(0.55, `rgba(${col},0.07)`); grd.addColorStop(1, `rgba(${col},0)`);
+    gx.fillStyle = grd; gx.fillRect(0, 0, 128, 128);
+    const pr = Math.min(o.sigma * 2.2, Math.max(W, H) * 0.8);
+    const m = new THREE.Mesh(new THREE.CircleGeometry(pr, 48), new THREE.MeshBasicMaterial({ map: new THREE.CanvasTexture(g), transparent: true, depthWrite: false }));
     m.position.set(o.x, o.y, 0.004); envGroup.add(m); }
 }
 // Circus bunting: a ring of triangular pennants hanging just below the top of the wall.
@@ -545,7 +849,7 @@ async function addFly(pos, yaw, sex = 'm', saved = null) {
   const id = takeSlot();
   const color = saved?.color || FLY_COLORS[id % FLY_COLORS.length];
   if (saved?.sex) sex = saved.sex;
-  const name = saved?.name || uniqueFlyName(id);
+  const name = saved?.name || await uniqueFlyName(id);
   const worker = new Worker(new URL('./sim/fly.worker.js', import.meta.url), { type: 'module' });
   const f = { id, slot: id, name, worker, color, sex, ready: false, last: null, prev: null, stats: {},
     createdAt: saved?.createdAt || Date.now(), restored: !!saved?.mb, stale: !!saved?.stale, ...buildFlyMesh(color, sex) };
@@ -564,15 +868,29 @@ async function addFly(pos, yaw, sex = 'm', saved = null) {
 }
 
 /** "Fly 3", or "Fly 3 (2)" if a saved fly already owns that name. Names key the store. */
-function uniqueFlyName(id) {
+/**
+ * A name no live fly AND no saved record already owns.
+ *
+ * Checking only the live flies is a data-loss bug: slots are recycled, and restoreFlies() loads
+ * at most FLY_CAP of however many are saved, so "Fly 3" can easily be free on screen while a
+ * saved Fly 3 still holds a trained brain. addFly() force-saves immediately, so the new naive
+ * animal would overwrite that brain without a word.
+ */
+async function uniqueFlyName(id) {
   const taken = new Set(flies.map(x => x.name));
+  if (PERSIST) { try { for (const r of await store.listFlies()) taken.add(r.name); } catch { /* store unreadable: live names are still better than nothing */ } }
   let n = `Fly ${id}`;
   for (let k = 2; taken.has(n); k++) n = `Fly ${id} (${k})`;
   return n;
 }
 
 /** Remove a fly for good: kill its worker, free its GPU/CPU resources and recycle its slot. */
-function removeFly(id) {
+/**
+ * Tear a fly down: kill its worker, free its GPU/CPU resources, recycle its slot.
+ * @param {boolean} forget also delete its saved brain. FALSE when relocating -- the animal is
+ *   being rebuilt elsewhere and its record must survive the teardown.
+ */
+function teardownFly(id, forget) {
   const i = flies.findIndex(f => f.id === id);
   if (i < 0) return false;
   const f = flies[i];
@@ -588,19 +906,81 @@ function removeFly(id) {
   shadowDirty = true; batches.dirty = true;
   broadcastOthers(true);                      // stop the survivors sensing a ghost proxy
   renderFlyList(); stackLabels(true); eyeLabels();
-  if (PERSIST) store.deleteFly(f.name).catch(e => console.warn('[flystore] delete failed', e));
-  window.__ringmaster?.say(`${f.name} has left the circus. Do not ask where.`, { priority: 2 });
+  if (forget) {
+    if (PERSIST) store.deleteFly(f.name).catch(e => console.warn('[flystore] delete failed', e));
+    window.__ringmaster?.say(`${f.name} has left the circus. Do not ask where.`, { priority: 2 });
+  }
   return true;
 }
+/** Remove a fly for good -- its saved brain goes with it. */
+function removeFly(id) { return teardownFly(id, true); }
+
+/**
+ * Move every fly to another place.
+ *
+ * Obstacles are compiled into each fly's MuJoCo model by buildWorldXML when the fly is built, so
+ * a new location cannot be applied to a running world -- repainting alone would leave the flies
+ * colliding with furniture they can no longer see. Each animal is therefore rebuilt in the new
+ * world, carrying its learned mushroom-body weights across through the same path the save/restore
+ * machinery uses. The fly that arrives is the fly that left, memories included.
+ *
+ * @param {string} name a key of LOOKS
+ * @returns {Promise<boolean>}
+ */
+async function relocate(name) {
+  if (!LOOKS[name] || relocating) return false;
+  relocating = true;
+  try {
+    // 1. take each animal with us: weights, identity, condition
+    const party = [];
+    for (const f of flies) {
+      const m = await requestMB(f);
+      party.push({ name: f.name, color: f.color, sex: f.sex, createdAt: f.createdAt,
+        mb: m?.mb || null, energy: m?.energy, health: m?.health, mbSig: MB_SIG() });
+    }
+    // 2. restage: surfaces, furniture, light, humidity, wind, food, hazards
+    LOOK = stageInto(env, name);
+    if (scene) scene.background = new THREE.Color(LOOK.sky);
+    applyLighting(LOOK);
+    // 3. empty the ring, keeping every saved brain intact
+    for (const f of [...flies]) teardownFly(f.id, false);
+    rebuildEnv();
+    // 4. rebuild each animal in the new world, weights and all
+    const A = env.arena, rect = A.shape === 'rect';
+    for (const [k, p] of party.entries()) {
+      const a = k / Math.max(1, party.length) * 2 * Math.PI;
+      // drop them inside the new ground, whatever shape it is
+      const pos = rect ? [Math.cos(a) * A.w * 0.5, Math.sin(a) * A.h * 0.5]
+                       : [Math.cos(a) * A.radius * 0.45, Math.sin(a) * A.radius * 0.45];
+      await addFly(pos, a + Math.PI, p.sex, p);
+    }
+    shadowDirty = true;
+    return true;
+  } finally { relocating = false; }
+}
+let relocating = false;
 
 function renameFly(id, name) {
   const f = flies.find(x => x.id === id);
   if (!f) return false;
   const was = f.name;
-  f.name = String(name).trim().slice(0, 24) || `Fly ${id}`;
+  const want = String(name).trim().slice(0, 24) || `Fly ${id}`;
+  if (want !== was && flies.some(x => x !== f && x.name === want)) {
+    alert(`"${want}" is already in the ring.`);
+    return false;
+  }
+  f.name = want;
   // The name is the key its brain is filed under, so renaming the fly renames its record.
-  if (PERSIST && f.name !== was) store.renameStored(was, f.name)
-    .then(ok => { if (!ok) saveFlyRecord(f, { force: true }); })
+  // renameStored refuses if the target name already belongs to a SAVED fly; force-saving after
+  // that refusal would overwrite that fly's brain with this one's, so the rename is reverted
+  // instead. Losing a trained animal to a name clash is worse than refusing the rename.
+  if (PERSIST && want !== was) store.renameStored(was, want)
+    .then(ok => {
+      if (ok) return;
+      f.name = was;
+      renderFlyList(); stackLabels(true); eyeLabels();
+      alert(`A saved fly is already called "${want}". The rename was undone so its brain is not overwritten.`);
+    })
     .catch(e => console.warn('[flystore] rename failed', e));
   renderFlyList(); stackLabels(true); eyeLabels();
   if (id === selected) $('#bpTitle').innerHTML = `Inside ${f.name} <i style="display:inline-block;width:8px;height:8px;border-radius:50%;background:${f.color}"></i>`;
@@ -645,7 +1025,7 @@ function buildUI() {
     const [pos, yaw] = spawnAt();
     let name = null;
     if (PERSIST) {
-      name = prompt('Name this fly (its brain is saved under this name):', uniqueFlyName(nextSlot));
+      name = prompt('Name this fly (its brain is saved under this name):', await uniqueFlyName(nextSlot));
       if (name === null) return;
       name = String(name).trim().slice(0, 24);
       if (flies.some(x => x.name === name)) { alert(`"${name}" is already in the ring. Pick another name.`); return; }
@@ -1087,6 +1467,7 @@ function setLook(name) {
   const next = LOOKS[name]; if (!next || next === LOOK) return false;
   LOOK = next;
   if (scene) scene.background = new THREE.Color(LOOK.sky);
+  applyLighting(LOOK);
   rebuildEnv();
   for (const f of flies) if (f.ready) f.worker.postMessage({ type: 'look', look: LOOK.albedo });
   shadowDirty = true;

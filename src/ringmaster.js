@@ -194,6 +194,30 @@ const ADVENTURES = [
   },
 ];
 
+// Places. Unlike the adventures above, these MOVE the flies: relocate() rebuilds each animal in
+// the new world carrying its learned weights, because obstacles are compiled into a fly's physics
+// model when it is built and cannot be swapped under a running one.
+const PLACES = [
+  { key: 'beach',   line: 'To the SEASIDE! Mind the damp. Mind the gulls. There are no gulls.' },
+  { key: 'field',   line: 'An open field. Nowhere to hide, and nothing to hide from. Probably.' },
+  { key: 'course',  line: 'The OBSTACLE COURSE! Six brains, one gauntlet, no instructions.' },
+  { key: 'heaven',  line: 'You have all been very good. Mostly. Welcome to the nice place.' },
+  { key: 'hell',    line: 'And now the OTHER place. Do try to keep off the floor.' },
+  { key: 'dungeon', line: 'The big top is GONE. Welcome to the dungeon. Mind the flagstones.' },
+  { key: 'cavern',  line: 'Down, down, down we go. It is damp. I did warn you. I did not warn you.' },
+  { key: 'circus',  line: 'Home again! The sawdust missed you.' },
+];
+const PLACE_RE = [
+  [/\b(beach|sea|seaside|shore|sand|coast)\b/i, 'beach'],
+  [/\b(field|meadow|grass|open|outside|outdoors)\b/i, 'field'],
+  [/\b(course|gauntlet|obstacle|assault|agility)\b/i, 'course'],
+  [/\b(heaven|paradise|clouds?|nice place|afterlife)\b/i, 'heaven'],
+  [/\b(hell|inferno|underworld|brimstone|damnation)\b/i, 'hell'],
+  [/\b(dungeon|castle|cell|crypt|flagstone)\b/i, 'dungeon'],
+  [/\b(cavern|cave|underground|sunken|damp)\b/i, 'cavern'],
+  [/\b(circus|big ?top|carnival|home|ring)\b/i, 'circus'],
+];
+
 // --- engine ------------------------------------------------------------------------------
 // Typed commands. Rule-based on purpose: no API key, no network, no latency, and it cannot
 // invent an adventure that the arena has no way to stage.
@@ -210,7 +234,7 @@ const COMMANDS = [
 ];
 const CONFUSED = [
   'I have absolutely no idea what that means, and I adore that about you.',
-  'Not in the repertoire, I am afraid. Try: sugar, bitter, lava, wind, lights out, threat, dungeon, cavern, monster.',
+  'Not in the repertoire. Try a scene: sugar, bitter, lava, wind, lights out, threat, monster. Or a place: beach, field, obstacle course, heaven, hell, dungeon, cavern, circus.',
   'A bold suggestion! Sadly the budget says no.',
 ];
 
@@ -265,6 +289,27 @@ export function startRingmaster(arena, { period = 75000, onLine = null } = {}) {
     }, 2600);
   }
 
+  /**
+   * Send everyone somewhere else. The flies are rebuilt in the new world with their learned
+   * weights carried across, so this takes a few seconds and must not overlap itself.
+   */
+  let moving = false;
+  async function goTo(key) {
+    if (moving) { say('One place at a time!', { priority: 3 }); return false; }
+    const place = PLACES.find(p => p.key === key);
+    if (!place || !arena.relocate) return false;
+    moving = true;
+    try {
+      arena.recallMonster?.();
+      if (adventure?.restore) { adventure.restore(arena.env); adventure = null; }
+      say(place.line, { priority: 3 });
+      const ok = await arena.relocate(key);
+      if (ok) { here = key; say(`${PLACES.find(p => p.key === key).key} it is. Everyone still with us? Marvellous.`, { priority: 1 }); }
+      return ok;
+    } finally { moving = false; }
+  }
+  let here = arena.theme || 'circus';
+
   // React to behaviour transitions on the flies we can see.
   function watch() {
     for (const f of arena.flies) {
@@ -314,6 +359,11 @@ export function startRingmaster(arena, { period = 75000, onLine = null } = {}) {
       return 'calm';
     }
 
+    // Places are checked BEFORE adventures: "take them to hell" is a relocation, not a round of
+    // The Floor Is Lava, and both would otherwise match on "hell"/"fire" style words.
+    for (const [re, key] of PLACE_RE) {
+      if (re.test(text)) { goTo(key); return 'place: ' + key; }
+    }
     for (const c of COMMANDS) {
       if (c.re.test(text)) { runAdventure(c.adventure); return c.adventure; }
     }
@@ -322,6 +372,7 @@ export function startRingmaster(arena, { period = 75000, onLine = null } = {}) {
   }
 
   return {
+    goTo, places: PLACES.map(p => p.key), get where() { return here; },
     stop() { timers.forEach(clearInterval); el.remove(); },
     say,
     command,

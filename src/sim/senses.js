@@ -254,7 +254,11 @@ export class CompoundEye {
 /** horizontal clearance (cm) from point p to the nearest wall, obstacle or other fly; negative = inside.
  *  With a height z, obstacles and flies that are not at that height are ignored. */
 export function clearance(p, env, others = [], z = null) {
-  const [x, y] = p; let d = env.arena.radius - Math.hypot(x, y);
+  const [x, y] = p; const A = env.arena;
+  // distance to the nearest wall, for whichever shape the arena is
+  let d = A.shape === 'rect' ? Math.min(A.w - Math.abs(x), A.h - Math.abs(y))
+                             : A.radius - Math.hypot(x, y);
+  if (!(A.wallHeight > 0)) d = Infinity;              // open ground: nothing to run into
   for (const o of env.obstacles) {
     // o.z raises the underside (staircase treads); a raised tread is only in the way over its
     // own height band, so a fly can pass beneath one and above the step below it.
