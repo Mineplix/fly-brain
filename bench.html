@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>NAF — headless throughput bench</title>
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<script src="coi-serviceworker.js"></script><!-- COOP/COEP: SharedArrayBuffer is required for the shared connectome -->
+<style>
+  :root { color-scheme: dark; }
+  body { margin: 0; background: #0b0f16; color: #e6edf3;
+         font: 13px/1.55 ui-monospace, Consolas, monospace; padding: 22px; }
+  h1 { font: 600 15px/1.3 system-ui, sans-serif; margin: 0 0 2px; letter-spacing: .01em; }
+  .sub { color: #7d8697; font: 12px/1.5 system-ui, sans-serif; margin-bottom: 14px; }
+  .sub a { color: #60a5fa; }
+  #status { color: #f6c624; margin-bottom: 10px; }
+  #out { white-space: pre; background: #070a10; border: 1px solid #1d2635; border-radius: 8px;
+         padding: 14px 16px; min-height: 340px; max-height: 70vh; overflow: auto; }
+  .note { color: #7d8697; font: 12px/1.6 system-ui, sans-serif; margin-top: 14px; max-width: 70ch; }
+  code { color: #9ae62c; }
+</style>
+</head>
+<body>
+<h1>PROJECT: NAF — headless throughput bench</h1>
+<div class="sub">The simulation path with the renderer removed: connectome, workers, physics, no THREE. <a href="arena.html">back to the arena</a></div>
+<div id="status">starting…</div>
+<pre id="out"></pre>
+<div class="note">
+  Keep this window in the foreground. A hidden tab throttles the worker timers by roughly 40×, and
+  any point measured that way is marked <code>DIRTY</code> rather than silently reported.<br><br>
+  <code>?flies=1,2,3,4,5,6</code> points to sweep ·
+  <code>&amp;repeats=3</code> windows per point ·
+  <code>&amp;window=20</code> seconds per window ·
+  <code>&amp;warm=2</code> discarded warm windows ·
+  <code>&amp;order=random</code> randomise point order ·
+  <code>&amp;vision=0</code> <code>&amp;props=0</code> <code>&amp;gpu=0</code> <code>&amp;noci=1</code> passed through to the flies.
+</div>
+<script type="module" src="/src/bench.js"></script>
+</body>
+</html>

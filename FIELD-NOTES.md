@@ -1969,3 +1969,67 @@ The remaining variance is environmental -- this pane throttles hard when not
 foregrounded (section 24) and drifts ~25% between runs. A ramp worth quoting
 needs a headless harness outside the preview pane, several repeats per point in
 randomised order, and the per-point spread reported alongside the mean.
+
+---
+
+## 28. The headless bench
+
+`bench.html` + `src/bench.js`. The simulation path with the renderer removed:
+connectome, workers, physics, and nothing else. No THREE import, no canvas, no
+scene, no shadow maps, no brain inset, no neural stack, no fly meshes.
+
+It exists because every number measured through `arena.html` carried three
+confounds that careful windowing could not remove (sections 24, 26, 27):
+
+1. **Rendering.** The arena's adaptive resolution scaler changes render load as
+   scene cost changes, which silently varies how much CPU the workers get
+   between conditions. Pinning it helped; removing rendering is better.
+2. **Throttling.** A hidden tab runs the worker timers ~40x slower.
+3. **Drift.** Repeats at identical settings differed ~25%, exceeding most of the
+   differences being interpreted.
+
+### It refuses to report a throttled number
+
+A `visibilitychange` watchdog records whether the document was ever hidden during
+a point, and any affected row is printed with `** TAB WAS HIDDEN -- DIRTY **`
+and carries `dirty: true` in the CSV.
+
+This is not decoration. The very first validation run came back with **both
+points flagged dirty**, because the preview pane loses focus between polls.
+Without the flag those numbers would have looked like ordinary results -- which
+is exactly how several hours went missing earlier in this project.
+
+### Staged identically to the arena, and it checks
+
+The furniture builders are duplicated here rather than imported, because
+importing them would drag in `arena.js` and with it THREE. Duplication is the
+lesser evil, but it can drift, so setup asserts the obstacle count (56 with
+props, 25 without) and logs a warning if the bench is no longer staged like the
+arena. The first version quietly built 54 -- it had dropped the dais and replaced
+the preset's own block instead of appending -- which the assertion now catches.
+
+### Usage
+
+    bench.html?flies=1,2,3,4,5,6   points to sweep
+      &repeats=3                   measurement windows per point, median reported
+      &window=20                   seconds of wall time per window
+      &warm=2                      discarded warm windows per point
+      &order=random                randomise point order, to decouple it from time
+      &vision=0 &props=0 &gpu=0 &noci=1     passed through to the flies
+
+Output ends in a CSV block: `flies,aggregate,perFly,spreadPct,dirty,dead`.
+`spreadPct` is (max-min)/median across the repeats, so the noise floor is
+reported next to every number rather than left to be assumed.
+
+> `order=random` matters for the same reason the arousal experiment failed
+> (section 25): running points in ascending order confounds the variable with
+> time.
+
+### What it still cannot do
+
+Throttling is browser policy and applies to any page, so the harness detects it
+rather than defeating it -- run it in a foreground window. Defeating it properly
+would need Chrome launched with `--disable-background-timer-throttling
+--disable-renderer-backgrounding --disable-backgrounding-occluded-windows`,
+driven from Node by Puppeteer or Playwright. That is a dependency, and adding one
+needs asking first.
