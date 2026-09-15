@@ -19,6 +19,7 @@
   },
   "devDependencies": {
     "meshoptimizer": "^1.2.0",
-    "playwright": "^1.63.0"
+    "playwright": "^1.63.0",
+    "puppeteer-core": "^25.11.0"
   }
 }
