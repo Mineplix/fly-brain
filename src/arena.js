@@ -1171,10 +1171,20 @@ function buildBrainPanel(data) {
     for (const ix of [g.L, g.R]) for (const i of ix) if (Number.isFinite(data.soma[i * 3])) n++;
     g.plottable = n;
   }
-  $('#groups').innerHTML = groups.map((g, j) => `<div class="g${g.plottable ? '' : ' nosoma'}" data-j="${j}">
-      <span class="name"><i style="background:${g.color}"></i>${g.label} <small>${g.L.length + g.R.length}</small>${g.plottable ? '' : `<em class="nosoma" title="These are peripheral neurons: their cell bodies lie in the antenna, proboscis or legs, outside the imaged volume, so the connectome has no soma coordinates for them. They are simulated and driven normally — there is simply nothing to plot.">no soma</em>`}<button class="q" title="what is this?">?</button></span>
+  // Measured plottable fractions: Smell 0/3,044, Taste 0/1,039, Photoreceptors 28/4,107 (0.7%),
+  // every other group 93-100%. A group at 0.7% technically draws, but 28 points among 165k is
+  // invisible -- so the badge reports the fraction rather than only flagging exact zeros.
+  const SOMA_NOTE = 'Peripheral neurons: their cell bodies lie in the antenna, proboscis, retina or legs, outside the imaged volume, so the connectome carries no soma coordinates for them. They are simulated and driven normally — there is simply nothing to plot.';
+  $('#groups').innerHTML = groups.map((g, j) => {
+    const tot = g.L.length + g.R.length, frac = tot ? g.plottable / tot : 1;
+    const badge = g.plottable === 0 ? `<em class="nosoma" title="${SOMA_NOTE}">no soma</em>`
+      : frac < 0.2 ? `<em class="nosoma" title="${SOMA_NOTE} Only ${g.plottable} of ${tot} have one, so the highlight is nearly invisible.">${g.plottable}/${tot} plotted</em>`
+      : '';
+    return `<div class="g${frac < 0.2 ? ' nosoma' : ''}" data-j="${j}">
+      <span class="name"><i style="background:${g.color}"></i>${g.label} <small>${tot}</small>${badge}<button class="q" title="what is this?">?</button></span>
       <canvas width="236" height="48"></canvas><span class="v"><b class="l">–</b><b class="r">–</b></span>
-      <div class="info" hidden>${g.info}</div></div>`).join('');
+      <div class="info" hidden>${g.info}</div></div>`;
+  }).join('');
   $('#groups').querySelectorAll('.g').forEach(el => {
     const j = +el.dataset.j;
     el.onmouseenter = () => { hover = j; }; el.onmouseleave = () => { hover = -1; };
