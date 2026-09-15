@@ -878,11 +878,13 @@ async function addFly(pos, yaw, sex = 'm', saved = null) {
  * saved Fly 3 still holds a trained brain. addFly() force-saves immediately, so the new naive
  * animal would overwrite that brain without a word.
  */
-async function uniqueFlyName(id) {
+async function uniqueFlyName(id, sex = 'm') {
   const taken = new Set(flies.map(x => x.name));
   if (PERSIST) { try { for (const r of await store.listFlies()) taken.add(r.name); } catch { /* store unreadable: live names are still better than nothing */ } }
-  let n = `Fly ${id}`;
-  for (let k = 2; taken.has(n); k++) n = `Fly ${id} (${k})`;
+  // the default name carries the sex, so two saved records are told apart at a glance
+  const stem = sex === 'f' ? `Fly ${id} ♀` : `Fly ${id}`;
+  let n = stem;
+  for (let k = 2; taken.has(n); k++) n = `${stem} (${k})`;
   return n;
 }
 
@@ -1026,12 +1028,18 @@ function buildUI() {
   const spawnAt = () => { const a = Math.random() * Math.PI * 2, r = Math.random() * env.arena.radius * 0.6; return [[r * Math.cos(a), r * Math.sin(a)], Math.random() * Math.PI * 2]; };
   // The name is asked for up front because it is the key this fly's saved brain is filed
   // under; renaming later moves the record, but naming it now is what you actually want.
+  // Both spawn buttons run this. They differ only in `sex`, which is easy to lose sight of once
+  // both show the same prompt -- so the prompt and the default name now say which is which.
+  // Sex is not cosmetic: it selects the female cuticle materials, hides the sex comb, and is sent
+  // to the worker, where it decides who courts whom.
   const spawnNamed = async sex => {
     if (flies.length >= FLY_CAP) { alert(`Fly limit reached: ${FLY_CAP}. Delete one first.`); return; }
     const [pos, yaw] = spawnAt();
+    const label = sex === 'f' ? 'female' : 'male';
     let name = null;
     if (PERSIST) {
-      name = prompt('Name this fly (its brain is saved under this name):', await uniqueFlyName(nextSlot));
+      name = prompt(`Name this ${label} fly (${sex === 'f' ? '♀' : '♂'}) — its brain is saved under this name:`,
+        await uniqueFlyName(nextSlot, sex));
       if (name === null) return;
       name = String(name).trim().slice(0, 24);
       if (flies.some(x => x.name === name)) { alert(`"${name}" is already in the ring. Pick another name.`); return; }
