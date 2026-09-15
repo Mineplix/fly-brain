@@ -2033,3 +2033,52 @@ would need Chrome launched with `--disable-background-timer-throttling
 --disable-renderer-backgrounding --disable-backgrounding-occluded-windows`,
 driven from Node by Puppeteer or Playwright. That is a dependency, and adding one
 needs asking first.
+
+---
+
+## 29. The sensory periphery has no soma coordinates
+
+Hovering the Smell or Taste group highlighted nothing in the brain inset. Not a
+rendering bug -- there is nothing to render.
+
+`showGroupInInset()` plots a group's neurons from `data.soma`, skipping any whose
+position is the non-finite sentinel. Decoding `neurons.flyn` directly and counting
+per class:
+
+| class | total | with soma | % |
+|---|---|---|---|
+| olfactory | 2,639 | **0** | 0.0% |
+| gustatory | 1,428 | **0** | 0.0% |
+| thermosensory | 25 | **0** | 0.0% |
+| hygrosensory | 66 | **0** | 0.0% |
+| mechanosensory | 1,733 | **0** | 0.0% |
+| mechanosensory (tactile) | 2,558 | **0** | 0.0% |
+| unknown sensory | 1,707 | **0** | 0.0% |
+| visual | 4,107 | 28 | 0.7% |
+| Kenyon cell | 4,064 | 4,050 | 99.7% |
+| DAN | 340 | 340 | 100.0% |
+| central complex | 2,950 | 2,944 | 99.8% |
+
+**Whole connectome: 140,024 of 165,122 have soma coordinates (84.8%). The missing
+15.2% is essentially the entire sensory periphery.**
+
+The reason is anatomical. These are peripheral neurons: their cell bodies sit in
+the antenna, maxillary palp, proboscis and legs, outside the imaged volume. Only
+their axon terminals are in the dataset. The encoder knows this -- `neurons.flyn`
+carries an explicit `has` bit per neuron and stores NaN when absent.
+
+> This is the SAME fact that blocked learning (section 24), seen from another
+> angle. There the consequence was that noxious afferents were absent and no
+> teaching signal could form; here the consequence is only that a panel cannot
+> draw them. The general statement is: **a central-brain EM volume contains the
+> terminals of the sensory periphery, not its cell bodies**, and anything that
+> reasons from soma positions or expects afferent populations to be complete will
+> be wrong in the same way.
+
+### The fix is honesty in the UI, not in the renderer
+
+The neurons are simulated and driven normally -- Smell shows 3,044 driven
+neurons in that very panel. Only the *plot* is impossible. `buildBrainPanel` now
+counts plottable somas per group and marks groups with none as "no soma", with a
+tooltip explaining why, and `showGroupInInset` returns early instead of drawing
+an empty highlight that looks like a fault.

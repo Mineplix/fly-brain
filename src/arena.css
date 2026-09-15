@@ -107,3 +107,12 @@ a { color: var(--acc); }
 }
 #eyerows .eyerow .who i { width: 6px; height: 6px; border-radius: 50%; display: inline-block; }
 #eyerows .eyerow.sel canvas { outline: 1px solid var(--acc); outline-offset: -1px; }
+
+/* Groups whose neurons have no soma coordinates cannot be highlighted in the inset: peripheral
+   afferents are in the dataset only as axon terminals. Say so rather than silently drawing nothing. */
+#groups .g .name em.nosoma {
+  font-style: normal; font-size: 9px; letter-spacing: .03em; text-transform: uppercase;
+  color: #8b93a3; border: 1px solid #2c3546; border-radius: 3px;
+  padding: 0 4px; margin-left: 6px; cursor: help; white-space: nowrap;
+}
+#groups .g.nosoma:hover { background: rgba(255,255,255,.03); }

@@ -1152,6 +1152,7 @@ let groups = [], hist = [], histFly = -1, hover = -1, hlShown = -1, hlPts = null
 // hovered group's neurons as large points over the inset (small groups vanish among 165k somas otherwise)
 function showGroupInInset(j) {
   hlShown = j; hlPts.visible = j >= 0; if (j < 0) return;
+  if (groups[j] && groups[j].plottable === 0) { hlPts.visible = false; return; }   // nothing to draw; the row says why
   const g = groups[j], src = brainPts.geometry.attributes.position.array, pos = [];
   for (const ix of [g.L, g.R]) for (const i of ix) if (src[i * 3] < 1e5) pos.push(src[i * 3], src[i * 3 + 1], src[i * 3 + 2]);
   hlPts.geometry.dispose(); hlPts.geometry = new THREE.BufferGeometry(); hlPts.geometry.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
@@ -1159,8 +1160,19 @@ function showGroupInInset(j) {
 }
 function buildBrainPanel(data) {
   groups = buildGroups(bodymap, meta.types, data.side);
-  $('#groups').innerHTML = groups.map((g, j) => `<div class="g" data-j="${j}">
-      <span class="name"><i style="background:${g.color}"></i>${g.label} <small>${g.L.length + g.R.length}</small><button class="q" title="what is this?">?</button></span>
+  // How many of a group's neurons can actually be PLOTTED. Peripheral sensory afferents have no
+  // soma coordinates at all -- their cell bodies sit in the antenna, proboscis and legs, outside
+  // the imaged volume, and only their axon terminals are in the dataset. Measured on this file:
+  // olfactory 0/2,639, gustatory 0/1,428, thermosensory 0/25, hygrosensory 0/66, mechanosensory
+  // 0/1,733, tactile 0/2,558, unknown sensory 0/1,707, visual 28/4,107 -- against 99-100% for
+  // central populations. Without this count the panel highlights nothing and looks broken.
+  for (const g of groups) {
+    let n = 0;
+    for (const ix of [g.L, g.R]) for (const i of ix) if (Number.isFinite(data.soma[i * 3])) n++;
+    g.plottable = n;
+  }
+  $('#groups').innerHTML = groups.map((g, j) => `<div class="g${g.plottable ? '' : ' nosoma'}" data-j="${j}">
+      <span class="name"><i style="background:${g.color}"></i>${g.label} <small>${g.L.length + g.R.length}</small>${g.plottable ? '' : `<em class="nosoma" title="These are peripheral neurons: their cell bodies lie in the antenna, proboscis or legs, outside the imaged volume, so the connectome has no soma coordinates for them. They are simulated and driven normally — there is simply nothing to plot.">no soma</em>`}<button class="q" title="what is this?">?</button></span>
       <canvas width="236" height="48"></canvas><span class="v"><b class="l">–</b><b class="r">–</b></span>
       <div class="info" hidden>${g.info}</div></div>`).join('');
   $('#groups').querySelectorAll('.g').forEach(el => {
