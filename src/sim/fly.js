@@ -12,6 +12,26 @@ import { Motor } from './motor.js';
 import { MushroomBody } from './mushroom.js';
 import { createBrain } from '../brainmodel.js';
 
+// Injury thresholds. `BURN.floor` sits below the 0.5 hazard value because heat at the tarsi is
+// the full substrate value only when the foot is on the floor; a fly on a crate should not burn.
+// `floor` is where tissue damage begins, and damage is PROPORTIONAL to how far above it the
+// substrate is -- not a step. The step version was a cliff with about a millimetre of margin:
+// heat at the tarsi is 0.5 * exp(-z / 0.28), so against a threshold of 0.35 an animal burned only
+// while its feet were below 0.28 * ln(0.5/0.35) = 0.0999 cm, and its thorax stands at 0.132. A
+// tarsus at 0.100 cm took nothing while one at 0.099 took the full rate, so damage flickered on
+// and off with the swing phase of a leg and stopped entirely if the animal stood tall. That made
+// injury a function of posture rather than of temperature. This is the same fault as the original
+// thorax-height bug, where the threshold was unreachable and nothing could ever be burned; moving
+// the measurement to the tarsi made it reachable but left almost no margin.
+// rate 1.6 killed a fly in 3.1 s of full tarsal contact -- max heat 0.5 less floor 0.30 is 0.2, so
+// 1.6 * 0.2 = 0.32 health/s. The escape reflex cannot fire before 1700 ms (motor.js refuses all
+// jumps inside a 1500 ms startup window), which left barely a second to act and turned an escape
+// experiment into a survival-time one: a fresh animal died at 3182 ms without leaving the floor.
+// At 0.9 an animal that never escapes still dies, in about 5.5 s, with room for the reflex to run.
+const BURN = { floor: 0.30, rate: 0.9 };
+// A strike is proximity-based: the monster geom does not collide, by design.
+const BITE = { reach: 0.42, rate: 0.9 };
+
 const Rt9 = (xm, b) => [xm[b * 9], xm[b * 9 + 3], xm[b * 9 + 6]];   // body x axis (heading) in world frame
 
 export class FlyAgent {
@@ -30,10 +50,9 @@ export class FlyAgent {
     this.sensorAdr = {}; for (let i = 0; i < M.nsensor; i++) this.sensorAdr[M.sensor(i).name] = M.sensor_adr[i];
     this.jointAdr = {}; for (let j = 0; j < M.njnt; j++) this.jointAdr[M.jnt(j).name] = M.jnt_qposadr[j];
     // geoms: albedo for vision; which bodies count as "self body" for bristle contact
-    this.geomKind = []; for (let g = 0; g < M.ngeom; g++) { const n = M.geom(g).name; this.geomKind.push(n === 'floor' ? 'floor' : n.startsWith('wall') ? 'wall' : n.startsWith('food') ? 'food' : n.startsWith('bitter') ? 'bitter' : n.startsWith('hazard') ? 'hazard' : n.startsWith('obst') ? 'obst' : n.startsWith('proxy') ? 'fly' : n.startsWith('threat') ? 'threat' : n.startsWith('janus') ? 'janus' : n.startsWith('monster') ? 'monster' : 'self'); }
+    this.geomKind = []; for (let g = 0; g < M.ngeom; g++) { const n = M.geom(g).name; this.geomKind.push(n === 'floor' ? 'floor' : n.startsWith('wall') ? 'wall' : n.startsWith('food') ? 'food' : n.startsWith('bitter') ? 'bitter' : n.startsWith('hazard') ? 'hazard' : n.startsWith('obst') ? 'obst' : n.startsWith('proxy') ? 'fly' : n.startsWith('threat') ? 'threat' : n.startsWith('monster') ? 'monster' : 'self'); }
     this.floorGeom = M.geom('floor').id;
     this.threatMocap = M.body_mocapid[M.body('threat').id];
-    this.janusMocap = M.body_mocapid[M.body('janus').id];
     this.monsterMocap = M.body_mocapid[M.body('monster').id];
     // brain
     this.brain = brain || createBrain(data, size, brainOpts, sign);   // wasm brain can be injected (shared connectome memory)
@@ -42,7 +61,14 @@ export class FlyAgent {
     this.neuromod = brainOpts.neuromod ? new Neuromod(data, this.brain, { calib: neuromod?.calib, block: neuromod?.block, params: neuromod?.params, minSyn: brainOpts.minSyn ?? 5 }) : null;
     const typeOf = data.meta.types, sideOf = data.side;
     this.senses = new Senses(bodymap, mj, M); this.senses.bindTypes(typeOf, sideOf);
-    if (noci) { const n = this.senses.bindNociceptors(typeOf); if (this.id === 0) console.info(`nociceptive afferents enabled: ${n} PPL neurons`); }
+    this.vpFix = this.senses.vpFix;   // VP1m/VP1l correction, reported so it can be checked
+    if (this.id === 0 && this.vpFix) console.info(`[senses] VP correction: ${this.vpFix.toHygro} VP1m -> hygrosensory, ${this.vpFix.toThermo} VP1l -> thermosensory`);
+    if (noci) {
+      const n = this.senses.bindNociceptors(typeOf, data.cls, data.superclass, data.meta);
+      if (this.id === 0) console.info(`nociceptive afferents enabled: ${n.ppl} PPL neurons (valence), ${n.vnc} VNC afferents (reflex)`);
+      if (this.id === 0 && !n.vnc) console.warn('[senses] VNC nociceptive branch is EMPTY — reflex arc inactive, only the valence branch is wired');
+      this.nociCounts = n;   // reported through the worker's ready message so a harness can verify it
+    }
     // LC10 small-object visual projection neurons: the eye-to-courtship channel. A nearby fly is detected
     // visually (LC10 responds to small moving objects; LC10a -> pC1/pIP10, Ribeiro et al. 2018), which is
     // how a male starts courting before the cVA pheromone plume reaches him
@@ -51,7 +77,8 @@ export class FlyAgent {
     // vision: flyvis optic-lobe model driving the male-CNS optic lobe (if provided), else the simple photoreceptor eye
     this.fv = vision && flyvis ? new FlyVisionFV(mj, M, this.mjd, bodymap, flyvis.map, flyvis.eyes, this.bid.head, this.bid.thorax, flyvis.gain ?? 150) : null;
     this.eye = vision && !this.fv ? new CompoundEye(mj, M, this.mjd, bodymap, this.bid.head, this.bid.thorax) : null;
-    this.motor = new Motor(mj, M, this.mjd, bodymap, typeOf, sideOf, gait, mode, { dnAll });
+    this.motor = new Motor(mj, M, this.mjd, bodymap, typeOf, sideOf, gait, mode,
+      { dnAll, superclass: data.superclass, superclassNames: data.meta?.superclasses });
     this.intrinsic = intrinsic ? new Intrinsic(typeOf, sideOf, id + 1 + (seed || 0), bodymap.feeding) : null;
     this.flight = new Flight({ mj, model: M, data: this.mjd, thorax: this.bid.thorax, jointAdr: this.jointAdr, act: this.motor.act, range: this.motor.range, rand: this.intrinsic?.rand });
     // Per-fly associative memory over the KC->MBON slice. Private to this animal; the shared
@@ -109,16 +136,6 @@ export class FlyAgent {
     const k = this.geomKind[g], L = this.look;
     if (k === 'threat') return 0.03;
     if (k === 'monster') return 0.04;   // near-black: a dark mass looming, not a bright object
-    // Janus is emissive, not reflective: the sky is divided out so the orb stays the brightest
-    // thing in the ring even with the lights down. `glow` already carries the arrival/departure
-    // ramp, so the flies see it brighten in and dim out rather than appear instantaneously.
-    // The brightest surface in the circus arena is the pale floor square at 0.92, so the orb sits
-    // above that even at glow 0: a glowing object should be the brightest thing in the ring, and
-    // a measured sweep showed that below ~0.9 it is lost against the floor rather than seen. The
-    // signal the flies actually get is therefore its ARRIVAL and DEPARTURE -- `glow` carries the
-    // fade ramp, so a bright object grows in and dims out over a few hundred ms, which is what
-    // the lobula columnar cells respond to. It is not a graded brightness code.
-    if (k === 'janus') return (0.95 + 0.45 * (this.env.janus?.glow || 0)) / Math.max(0.05, this.env.light.sky);
     if (k === 'floor') return L.floorLo + (L.floorHi - L.floorLo) * (((Math.floor(x / 0.4) + Math.floor(y / 0.4)) & 1) ? 1 : 0);   // checker floor
     if (k === 'wall') { const a = Math.atan2(y, x); return L.wallLo + (L.wallHi - L.wallLo) * ((Math.floor(a / (Math.PI / 12)) & 1) ? 1 : 0); }  // striped wall
     if (k === 'food') return 0.9; if (k === 'bitter') return 0.5; if (k === 'hazard') return 0.6; if (k === 'obst') return 0.12; if (k === 'fly') return 0.08;
@@ -130,12 +147,13 @@ export class FlyAgent {
     const mj = this.mj, M = this.model, d = this.mjd;
     const th = this.env.threat, tm = this.threatMocap * 3;
     if (th) { d.mocap_pos[tm] = th.x; d.mocap_pos[tm + 1] = th.y; d.mocap_pos[tm + 2] = th.z; } else if (d.mocap_pos[tm + 2] > -10) d.mocap_pos[tm + 2] = -20;
-    const jn = this.env.janus, jm = this.janusMocap * 3;
-    if (jn) { d.mocap_pos[jm] = jn.x; d.mocap_pos[jm + 1] = jn.y; d.mocap_pos[jm + 2] = jn.z; } else if (d.mocap_pos[jm + 2] > -10) d.mocap_pos[jm + 2] = -20;
     const mo = this.env.monster, mm = this.monsterMocap * 3;
     if (mo) { d.mocap_pos[mm] = mo.x; d.mocap_pos[mm + 1] = mo.y; d.mocap_pos[mm + 2] = mo.z; } else if (d.mocap_pos[mm + 2] > -10) d.mocap_pos[mm + 2] = -20;
     const st = this.state();
     const rates = this.senses.update(st, this.env, 1); this._sugar = st.sugar;
+    // `state()` builds a fresh st each call, so anything Senses writes onto st is gone by the time
+    // postPose() runs. Keep the scalars the host wants to display on the agent itself.
+    this.heatFelt = st.heat || 0; this.songHeard = st.song || 0;
     if (this.eye && (this.t % 10 === 0)) { this._eyeRates = new Map(); const er = this._eyeRates; this.eye.update({ set: (ix, hz) => { for (const i of ix) er.set(i, hz); } }, this.env, 10, this.albedo); }
     if (this.fv && (this.t % 20 === 0)) { this._eyeRates = new Map(); const er = this._eyeRates; this.fv.update((ix, hz) => { for (const i of ix) er.set(i, hz); }, this.env, this.albedo, 20); }
     if (this._eyeRates) for (const [i, hz] of this._eyeRates) rates.set(i, hz);
@@ -171,7 +189,7 @@ export class FlyAgent {
     // The former 80 ms pulse silently expired if the user clicked just after loading.
     if (this.takeoffPending && this.intrinsic) this.intrinsic.takeoffUntil = this.intrinsic.t + 80;
     if (this.intrinsic) this.intrinsic.update(1, B, { energy: this.energy, arousal: this.neuromod?.arousal, touch: st.antTouch, rearing: st.pitchUp > 0.45 && this.motor.jumpT < 0 && !this.motor.righting,
-      heat: { left: heatAt(st.antenna.left, this.env), right: heatAt(st.antenna.right, this.env) }, sugar: this._sugar || 0, flying: this.flight.active, ahead: st.ahead, court,
+      heat: { left: heatAt(st.antenna.left, this.env), right: heatAt(st.antenna.right, this.env) }, heatFeet: this.heatFeetFelt || 0, up: this.mjd.xmat[this.bid.thorax * 9 + 8], sugar: this._sugar || 0, flying: this.flight.active, ahead: st.ahead, court,
       mouthOnFood: this.env.food.some(f => f.amount > 0 && Math.hypot(st.labellum[0] - f.x, st.labellum[1] - f.y) < f.r - 0.02) });
     const nd = new Int32Array(rates.size); let k = 0; for (const [i, hz] of rates) { B.setDriveOne(i, hz); nd[k++] = i; } this.driven = nd;
     // GF -> TTMn electrical synapse (not in the chemical connectome): GF spikes depolarise TTMn directly
@@ -187,9 +205,16 @@ export class FlyAgent {
     if (this.motor.pivot) this.lastPivot = this.t;
     const gated = this.t - (this.lastTouch ?? -1e9) < 500 || this.t - (this.lastPivot ?? -1e9) < 300;
     this.motor.flying = this.flight.active;
-    this.cmd = this.motor.apply(this.t, 1, { up: this.mjd.xmat[this.bid.thorax * 9 + 8], touching: gated, voluntary: this.takeoffPending || (this.intrinsic && this.t < this.intrinsic.takeoffUntil),
+    this.cmd = this.motor.apply(this.t, 1, { up: this.mjd.xmat[this.bid.thorax * 9 + 8],
+      // WHICH SIDE IS UP. xmat is row-major, so [8] is the world-z component of the body's z
+      // axis (`up`) and [7] is the world-z component of its y axis. In flybody local +y is the
+      // animal's LEFT, so roll > 0 means the left flank is raised and the animal is lying on its
+      // RIGHT. The righting reflex needs this: it pushes with one side, and pushing with the
+      // side that is already underneath drives the animal further onto it.
+      roll: this.mjd.xmat[this.bid.thorax * 9 + 7], touching: gated, voluntary: this.takeoffPending || (this.intrinsic && this.t < this.intrinsic.takeoffUntil),
       court: this.intrinsic?.state === 'court' ? { sing: !!this.intrinsic.courtSing, side: this.intrinsic.courtSide } : null,
-      contact: st.bodyContact.left || st.bodyContact.right || st.antTouch.left || st.antTouch.right });   // no takeoff while pressed against something
+      contact: st.bodyContact.left || st.bodyContact.right || st.antTouch.left || st.antTouch.right,   // no takeoff while pressed against something
+      urgent: !!(this.intrinsic && this.t < this.intrinsic.urgentUntil) });                            // ...unless the substrate is burning it
     // takeoff: once the jump has pushed off, the wings start (tarsal reflex); an escape banks away from the threat
     if (this.motor.launchT === this.t && !this.flight.active) {
       const th = this.env.threat; this.flight.start(this.t, { cause: this.motor.jumpCause, awayFrom: th ? [th.x, th.y] : null }); this.flights++; this.takeoffPending = false;
@@ -217,9 +242,40 @@ export class FlyAgent {
         const intake = dt * 0.15 * f.sugar * (0.3 + 0.7 * this.motor.feeding());
         f.amount -= intake; this.energy += intake; this.eaten += intake; this.foodEaten[this.env.food.indexOf(f)] += intake; }
     }
-    if (st.heat > 0.5) this.health -= dt * 0.5 * st.heat;
-    if (this.energy <= 0) { this.energy = 0; this.health -= dt * 0.2; }
+    // --- injury ---------------------------------------------------------------------------
+    // BURNS ARE MEASURED AT THE FEET, NOT THE THORAX. The previous test was `st.heat > 0.5`,
+    // where st.heat is sampled at the thorax -- and the thorax stands at z = 0.13, where heat has
+    // already decayed by exp(-0.13/0.28) = 0.629. Against a hazard of 0.5 the thorax can read at
+    // most 0.314, so the threshold was unreachable and NOTHING could ever be burned. Across five
+    // thermal runs the animals sat in heat of 0.306-0.340 and took no damage, which was read as a
+    // failure to escape without noticing they were also invulnerable. The tarsi are what touch
+    // the substrate, so that is where a burn is incurred.
+    let heatFeet = 0;
+    for (const k of Object.keys(this.claw)) { const h = heatAt(st.claw[k], this.env); if (h > heatFeet) heatFeet = h; }
+    // On the AGENT, not on st: state() builds a fresh object each call, so a value written onto
+    // st here is gone before postPose() reads it. Same trap as heatFelt/songHeard above.
+    st.heatFeet = heatFeet; this.heatFeetFelt = heatFeet;
+    const burn = Math.max(0, heatFeet - BURN.floor);
+    if (burn > 0) this.health -= dt * BURN.rate * burn;
+
+    // --- predation -------------------------------------------------------------------------
+    // The monster is deliberately non-colliding (contype 0 in world.js) so it cannot wedge the
+    // physics solver against a fly. That also meant it could not touch the animal in any sense:
+    // it was a dark shape that moved, and nothing in the health calculation referred to it. A
+    // predator that cannot harm is scenery. Damage is therefore applied by proximity, which keeps
+    // the solver untouched, and is reported so a death can be attributed.
+    const mo = this.env.monster;
+    if (mo && this.alive) {
+      const d = Math.hypot(st.pos[0] - mo.x, st.pos[1] - mo.y, (st.pos[2] || 0) - (mo.z ?? 0.13));
+      if (d < BITE.reach) {
+        this.health -= dt * BITE.rate * (1 - d / BITE.reach);
+        this.lastHarm = 'monster';
+      }
+    }
+    if (burn > 0) this.lastHarm = 'burn';
+    if (this.energy <= 0) { this.energy = 0; this.health -= dt * 0.2; this.lastHarm = 'starvation'; }
     this.energy = Math.min(1, this.energy);
+    this.health = Math.min(1, this.health);
     if (this.health <= 0 && this.alive) { this.alive = false; this.health = 0; }
   }
   behavior(st) {

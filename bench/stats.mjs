@@ -133,6 +133,19 @@ export function minDetectableD(nPerGroup, power = 0.8) {
   return (1.96 + z) * Math.sqrt(2 / nPerGroup);
 }
 
+/**
+ * Smallest effect detectable by a PAIRED test at the given n (one-sample on the differences).
+ * Different formula from the two-sample case -- d = (z_a + z_b)/sqrt(n) rather than
+ * (z_a + z_b)*sqrt(2/n) -- and the difference is not cosmetic: at n = 3 a paired design reaches
+ * d = 1.62 where a two-sample one reaches only 2.29. Repeated-measures experiments must be
+ * reported against this one or they understate their own power by ~40%.
+ */
+export function minDetectableDPaired(n, power = 0.8) {
+  if (n < 2) return Infinity;
+  const z = { 0.8: 0.8416, 0.9: 1.2816, 0.95: 1.6449 }[power] ?? 0.8416;
+  return (1.96 + z) / Math.sqrt(n);
+}
+
 // ---- reporting -------------------------------------------------------------------------------
 const f = (x, n = 3) => (Number.isFinite(x) ? x.toFixed(n) : '—');
 /** APA-ish inline summary: M = 0.31, SD = 0.04, 95% CI [0.26, 0.36] */
@@ -176,6 +189,8 @@ if (import.meta.url === `file://${process.argv[1]?.replace(/\\/g, '/')}` || proc
   ok &= near(cohensD([10, 11, 12, 11, 10], [1, 2, 1, 2, 1]) > 8 ? 1 : 0, 1, 0.5, "Cohen's d is large");
   // power
   ok &= near(minDetectableD(3), 2.29, 0.05, 'min detectable d at n=3');
+  ok &= near(minDetectableDPaired(3), 1.62, 0.02, 'min detectable paired d at n=3');
+  ok &= near(minDetectableDPaired(16), 0.70, 0.02, 'min detectable paired d at n=16');
   ok &= near(minDetectableD(30), 0.72, 0.02, 'min detectable d at n=30');
   console.log(ok ? '\nall statistics checks passed' : '\nSTATISTICS SELF-TEST FAILED');
   process.exitCode = ok ? 0 : 1;

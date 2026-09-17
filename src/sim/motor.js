@@ -8,14 +8,38 @@ export const DN_ROLES = {
   // Locomotion phenotypes of DN activation: Cande et al. 2018 (eLife 7:e34275), Bidaye et al. 2014/2020,
   // Sapkal et al. 2024 (BDN2, oDN1), Rayshubskiy et al. 2020 (DNa02 steering), von Reyn 2014 (GF).
   // walking command neurons carry the drive; the others are visually driven all the time and only modulate it
-  forward: { DNg100: 1, DNg97: 1, DNp09: 1, DNa05: 0.2, DNa07: 0.2, DNp26: 0.2, DNg25: 0.2, DNa01: 0.1, DNa02: 0.1 },
+  // DNp09 REMOVED from forward drive. Full audit: docs/25-bodymap-provenance.md It was weighted 1, equal to DNg100 and DNg97, and carried
+  // 26.3% of the pool's weighted mass. Its documented primary function is the opposite: silencing
+  // it disrupts freezing without preventing fleeing, and optogenetic activation triggers freezing
+  // in about 60% of trials (Zacarias et al., 2018). Activation does produce a transient speed
+  // increase before the freeze, so DNp09 is not purely a stop command -- it is state-dependent,
+  // and this model has no representation of that state. Rather than encode a context-dependent
+  // neuron as a context-free forward drive, it is dropped from the walking pool. It is retained
+  // in `turn` at its original weight, which is a separate claim and was not audited.
+  //
+  // DNg25 also removed: it matches zero neurons in this dataset and contributed nothing.
+  forward: { DNg100: 1, DNg97: 1, DNa05: 0.2, DNa07: 0.2, DNp26: 0.2, DNa01: 0.1, DNa02: 0.1 },
   backward: { MDN: 1 },
   turn: { DNa02: 1.0, DNa01: 0.6, DNp09: 0.5 },   // ipsilateral steering
   groom: { DNg07: 1, DNg08: 1, DNg12: 1 },         // head grooming with the front legs
   escape: { DNp01: 1 },                            // giant fibre
-  takeoff: { DNp02: 1, DNp04: 1 },                 // looming-sensitive non-GF escape DNs (von Reyn 2014, Namiki 2018)
+  // Takeoff. DNp02/DNp04 were chosen from the looming-escape literature; DNp06 and DNp10 were
+  // added after asking the connectome a different question -- WHICH descending neurons synapse
+  // onto the jump muscle motor neurons (TTMn)? The answer is exactly four types: DNp01 (90
+  // synapses), DNp06 (53), DNp02 (26), DNp10 (8). Two of the four were not being read at all, so
+  // the jump command pathway was incomplete: a brain could recruit DNp06 and nothing downstream
+  // would notice. Selection here is by MOTOR TARGET, not by what drives the neuron, so including
+  // them does not presuppose which stimulus ought to trigger a jump.
+  //
+  // They remain the escape cluster, so this does not manufacture a thermal escape route. It makes
+  // the question answerable: if noxious heat recruits the jump pathway, the body can now act on it.
+  takeoff: { DNp02: 1, DNp04: 1, DNp06: 1, DNp10: 1 },
   courtP: { pIP10: 1 },                            // P1->VNC courtship interneuron (fru+; Deutsch et al. 2020)
-  courtDN: { DNp13: 1 },                           // courtship pursuit descending neuron
+  // DNp13 is a SONG neuron, not a pursuit neuron. It is dsx+, connects strongly to the TN1A sine
+  // neurons, and increases sine song production when co-activated with pIP10 (Ding et al., 2024).
+  // The earlier label "courtship pursuit descending neuron" was wrong; the courtship grouping is
+  // right, so the readout is unchanged and only the claim about what it does is corrected.
+  courtDN: { DNp13: 1 },
 };
 export const READOUT = { takeoffThreshold: 70, takeoffRatio: 3, takeoffTauSlow: 3000, takeoffInit: 20, startupMs: 1500, gfSpikes: 4, gfWindow: 50, fwdThreshold: 4, fwdScale: 12, turnScale: 25, turnAdaptTau: 4000, backMax: 0.35, groomScale: 40, turnTau: 150, flightTurnTau: 50, muscleHalf: 17,
   courtPBase: 5, courtPScale: 4, courtDNBase: 12, courtDNScale: 8 };   // courtship readout: baseline-subtracted, normalised
@@ -24,9 +48,16 @@ export const READOUT = { takeoffThreshold: 70, takeoffRatio: 3, takeoffTauSlow: 
 const LEGS = ['T1', 'T2', 'T3'], SIDES = ['left', 'right'];
 // jump program selected by scripts/jump_test2.py: lands upright from any walking phase, >=1.1 mm hop
 const JUMP = { pre: 30, push: 20, f2: 0.7, t2: 0.5, f3: 0.4, f1: 0.5, fly: 80 };   // scripts/jump_test3.py: 24/24 upright from fast turning gaits
-// righting reflex (VNC-level; scripts/righting_test.py): inverted > 150 ms -> left wing pushes on the substrate
-// while the legs flail in tripod antiphase; rights the fly from all tested inverted starts within ~0.1 s
-const RIGHT = { f: 6, aL: 1.0, aR: 0.3, tib: 0.5, abd: 0.5, wy: 1.0, wr: -1.0, wp: -1.0, wf: 4 };
+// righting reflex (VNC-level): inverted > 150 ms -> the RAISED flank's wing and legs push on the
+// substrate while the legs flail in tripod antiphase. The claim that this rights the fly from all
+// tested starts within ~0.1 s came from scripts/righting_test.py and has never held in the arena:
+// measured success was 1-3 in 12. See the reflex body for what was actually measured.
+// `aL`/`aR` are now the PUSHING and TRAILING sides rather than left and right -- see the reflex.
+export const RIGHT = { f: 6, aL: 1.0, aR: 0.3, tib: 0.5, abd: 0.5, wy: 1.0, wr: -1.0, wp: -1.0, wf: 4,
+                commitAt: -0.25,   // `up` past which the reflex stops rocking and holds the push
+                sideLatch: 0.15,   // |roll| needed to re-pick the pushing side once one is chosen
+                mirror: 1 };       // 0 pins the push to the left, i.e. the old fixed-side reflex
+                                   // -- the control arm for bench/probe-righting.mjs
 const PIVOT = { turn: 0.25, amp: 0.55, inner: -0.7 };   // turning on the spot
 const PHASE = { T1_left: 0, T2_right: 0, T3_left: 0, T1_right: Math.PI, T2_left: Math.PI, T3_right: Math.PI };
 
@@ -47,14 +78,20 @@ export class Motor {
     // reads ~18 named types; this is every neuron the connectome labels descending, so the
     // population can be MEASURED even when it is not read. Without it, a fly that fails to escape
     // cannot be told apart from a fly whose escape command is computed and then ignored.
-    const scNames = (data.meta && data.meta.superclasses) || [];
+    // NOTE: `data` here is the MuJoCo data object, not the connectome. The superclass array and
+    // its names come through opts. An earlier version read data.meta.superclasses, found
+    // undefined, and silently selected ZERO descending neurons -- the instrumentation reported
+    // "all 0 neurons" and the experiment it was built for produced no answer.
+    const scNames = opts.superclassNames || [];
+    const scArr = opts.superclass;
     const dnSc = scNames.indexOf('descending_neuron');
     this.dnAllIdx = []; this.dnAllSide = [];
-    if (dnSc >= 0 && data.superclass) {
-      for (let i = 0; i < data.superclass.length; i++) {
-        if (data.superclass[i] === dnSc) { this.dnAllIdx.push(i); this.dnAllSide.push(sideOf[i]); }
+    if (dnSc >= 0 && scArr) {
+      for (let i = 0; i < scArr.length; i++) {
+        if (scArr[i] === dnSc) { this.dnAllIdx.push(i); this.dnAllSide.push(sideOf[i]); }
       }
     }
+    if (!this.dnAllIdx.length) console.warn('[motor] descending population is EMPTY — instrumentation inactive');
     this.dnAllIdx = Int32Array.from(this.dnAllIdx);
     this.dnAllSide = Int8Array.from(this.dnAllSide);
     this.useAllDN = !!opts.dnAll;
@@ -86,7 +123,31 @@ export class Motor {
     const actv = {};
     const kHalf = Math.LN2 / READOUT.muscleHalf;
     for (const m of this.muscles) { const a = 1 - Math.exp(-this.mean(m.idx) * kHalf); (actv[m.actuator] ||= []).push([m.dir, a]); }
-    const muscleCtrl = (name, rest = 0) => { const [lo, hi] = R[name]; let v = rest; for (const [dir, a] of actv[name] || []) v += dir > 0 ? a * (hi - rest) : -a * (rest - lo); return v; };
+    // NET first, then scale. The previous form summed each muscle's contribution scaled by the
+    // distance to its own end of the range, which gives agonist and antagonist unequal authority
+    // whenever the joint range is asymmetric about `rest`. femur_T1_left runs [-0.15, 2.0], so an
+    // extensor firing at activation a contributed a*2.0 while a flexor at the same a contributed
+    // only -a*0.15: balanced motor-neuron activity produced a net of +1.85 and pinned the joint at
+    // its limit. Measured in connectome mode: 4 of 48 leg joints sat at a range limit and the
+    // animal could not hold a posture, which was reported as the connectome being unable to stand.
+    // It was the read-out. Computing the net activation first means equal drive on both sides
+    // returns exactly `rest`, and the full range stays reachable when drive is one-sided.
+    // MEAN PER DIRECTION, not sum. Each muscle's activation is already bounded in [0,1), but the
+    // count of muscles mapped to one actuator is not: summing three extensors at a modest 0.6 each
+    // gives 1.8, and any net beyond 1 pins the joint at a range limit no matter how the ranges are
+    // scaled. That is a second, independent saturation from the asymmetric-range one fixed above,
+    // and it survived it -- runs on 2026-09-16 still showed 6 and 8 of 48 joints pinned, with the
+    // animal toppling into a righting response partway through locomotion. Averaging makes each
+    // direction contribute at most 1 regardless of how many muscles the connectome assigns to it,
+    // so net lies in [-1, 1] and a joint reaches its limit only under sustained one-sided drive
+    // (~73 Hz with the antagonist silent, given muscleHalf = 17). Joint count stops being a gain.
+    const muscleCtrl = (name, rest = 0) => {
+      const [lo, hi] = R[name];
+      let ext = 0, nExt = 0, flex = 0, nFlex = 0;
+      for (const [dir, a] of actv[name] || []) { if (dir > 0) { ext += a; nExt++; } else { flex += a; nFlex++; } }
+      const net = (nExt ? ext / nExt : 0) - (nFlex ? flex / nFlex : 0);
+      return rest + (net >= 0 ? net * (hi - rest) : net * (rest - lo));
+    };
     for (const name of ['rostrum', 'haustellum', 'labrum_left', 'labrum_right', 'antenna_left', 'antenna_right']) if (A[name] !== undefined) set(name, muscleCtrl(name));
     // --- locomotion ---
     const fwd = this.wmean(this.dn.forward), back = this.wmean(this.dn.backward), groom = this.wmean(this.dn.groom);
@@ -186,7 +247,26 @@ export class Motor {
     const loomTakeoff = to > READOUT.takeoffThreshold && to > READOUT.takeoffRatio * this.toSlow;
     // an inverted fly cannot jump; nor does one whose antennae are on the object filling its view (a wall it
     // walked into looms on the eye, but touch says it is not an approaching predator)
-    const canJump = (extra.up ?? 1) > 0.5 && !this.righting && !(this.recoverUntil > tMs) && !this.flying && (!extra.touching || (extra.voluntary && !extra.contact));
+    // `urgent` (a burning tarsus, from the escape reflex in intrinsic.js) overrides the contact
+    // gate but NOT the posture gates: an inverted, righting or already-flying animal still cannot
+    // launch, because it physically cannot. Only the "pressed against something" veto is lifted.
+    const canJump = (extra.up ?? 1) > 0.5 && !this.righting && !(this.recoverUntil > tMs) && !this.flying
+      && (!extra.touching || (extra.voluntary && !extra.contact) || extra.urgent);
+    // WHY A TAKEOFF WAS REFUSED. A request that is issued and vetoed is indistinguishable from one
+    // that was never issued, from outside: both look like a fly that stays on the ground. Check 3
+    // of the verification harness failed while the strictly harder check 4b passed, which no
+    // amount of reasoning about the gate could settle without knowing which term was false.
+    if (extra.voluntary || this.gfSpike || loomTakeoff) {
+      this.jumpVeto = !((extra.up ?? 1) > 0.5) ? 'inverted'
+        : this.righting ? 'righting'
+        : this.recoverUntil > tMs ? 'recovering'
+        : this.flying ? 'already flying'
+        : (extra.touching && !(extra.voluntary && !extra.contact) && !extra.urgent) ? 'contact gate'
+        : this.jumpT >= 0 ? 'jump in progress'
+        : tMs <= READOUT.startupMs ? 'startup lockout'
+        : null;
+      if (this.jumpVeto) this.jumpVetoT = tMs;
+    }
     if ((this.gfSpike || loomTakeoff || extra.voluntary) && canJump && this.jumpT < 0 && tMs > READOUT.startupMs) { this.jumpT = tMs; this.launchT = -1; this.jumpCause = this.gfSpike ? 'GF burst' : loomTakeoff ? `takeoff DNs ${to.toFixed(0)}Hz (baseline ${this.toSlow.toFixed(0)})` : 'voluntary'; if (globalThis.LOG_JUMPS) console.log(`jump at ${tMs} ms: ${this.jumpCause}, up ${(extra.up ?? 1).toFixed(2)}`); }
     if (this.jumpT >= 0) {
       // jump program (tested in scripts/jump_test.py): TTM drives both middle legs to full extension for 20 ms,
@@ -211,18 +291,72 @@ export class Motor {
     this.invertedMs = up < -0.3 && !this.flying ? (this.invertedMs || 0) + dtMs : 0;
     if (this.invertedMs > 150 || (this.righting && up < 0.8)) {
       this.righting = true; const t = tMs / 1000, P = RIGHT;
+      // PUSH WITH THE FLANK THAT IS RAISED, not with the left.
+      //
+      // Measured with bench/probe-rollside.mjs, 12 flips: the animal settles onto EITHER side, 5
+      // right and 6 left, near enough a coin flip. Split by side, with the old left-only drive:
+      //
+      //     lying on the RIGHT (left flank up)   3 of 5 got past horizontal, 1 righted
+      //     lying on the left  (right flank up)  0 of 6 got past horizontal, 0 righted
+      //
+      // So the left-strong drive is CORRECT for a right-side-down animal -- the raised legs swing
+      // over the top and plant beyond the body to lever it -- and simply has no working mode for the
+      // other half of trials, where the legs it drives are the ones pinned underneath. Pushing with
+      // the pinned side lifts that flank and rolls the animal back onto its spine.
+      //
+      // roll is xmat[7], the world-z component of the body's y axis, and local +y is the animal's
+      // LEFT. roll > 0 therefore means the left flank is raised, and the left is the side to push
+      // with -- which is what the old constants did, for that half of the cases only.
+      //
+      // LATCHED, because roll crosses zero constantly while the animal rocks: re-picking the side
+      // every step would swap the drive mid-stroke and cancel the momentum the oscillation exists
+      // to build. The side is chosen when the reflex starts and only changes if the animal has
+      // clearly gone over onto the other flank.
+      const roll = extra.roll ?? 0;
+      if (!this.pushSide || Math.abs(roll) > P.sideLatch)
+        this.pushSide = P.mirror === 0 ? 'left' : (roll > 0 ? 'left' : 'right');
+      const pushing = this.pushSide, trailing = pushing === 'left' ? 'right' : 'left';
+      // COMMIT ONCE THE ROLL IS WON, instead of rocking forever.
+      //
+      // Measured with bench/probe-righting.mjs on a deliberately flipped animal on a cool floor:
+      // `up` ran -0.88 -> +0.33 -> -0.56 over 12 s, 714 of 722 samples labelled righting, all 18 leg
+      // joints receiving commands. So the motion was not dead and not too weak -- it got the animal
+      // a third of the way past horizontal and then let it fall back, over and over. The cause is
+      // that the drive is a 6 Hz oscillation: half of every cycle pushes the animal over, and the
+      // other half pushes it back. That is fine for building momentum from supine and exactly wrong
+      // once it is on edge, which is the point where a real fly plants its legs and follows through.
+      //
+      // So above `commitAt` the phase is FROZEN at the top of the push (sin = 1) rather than allowed
+      // to reverse, and the wing holds instead of beating. The oscillation still does the work of
+      // getting off the back; the hold does the work of finishing.
+      const committed = up > P.commitAt;
+      const lphBase = 2 * Math.PI * P.f * t;
       for (const leg of LEGS) for (const sd of SIDES) {
-        const amp = sd === 'left' ? P.aL : P.aR, lph = 2 * Math.PI * P.f * t + (['T1_left', 'T2_right', 'T3_left'].includes(`${leg}_${sd}`) ? 0 : Math.PI);
+        const amp = sd === pushing ? P.aL : P.aR;
+        const phase = lphBase + (['T1_left', 'T2_right', 'T3_left'].includes(`${leg}_${sd}`) ? 0 : Math.PI);
+        const lph = committed ? Math.PI / 2 : phase;      // frozen at full push once committed
         set(`coxa_${leg}_${sd}`, amp * Math.sin(lph) * R[`coxa_${leg}_${sd}`][1]);
         set(`femur_${leg}_${sd}`, amp * (0.5 + 0.5 * Math.sin(lph)) * R[`femur_${leg}_${sd}`][1]);
         set(`tibia_${leg}_${sd}`, P.tib * R[`tibia_${leg}_${sd}`][1]);
-        set(`coxa_abduct_${leg}_${sd}`, R[`coxa_abduct_${leg}_${sd}`][0] * P.abd * (sd === 'left' ? 1 : 0.2));
+        set(`coxa_abduct_${leg}_${sd}`, R[`coxa_abduct_${leg}_${sd}`][0] * P.abd * (sd === pushing ? 1 : 0.2));
+        // Claws grip on the push half only. While committed the pushing legs hold their grip, which
+        // is what lets the animal lever itself over rather than skating.
         set(`adhere_claw_${leg}_${sd}`, Math.sin(lph) > 0 ? 1 : 0);
       }
-      const w = 0.5 + 0.5 * Math.sin(2 * Math.PI * P.wf * t);
-      set('wing_yaw_left', P.wy * w); set('wing_roll_left', P.wr * w); set('wing_pitch_left', P.wp * w);
+      const w = committed ? 1 : 0.5 + 0.5 * Math.sin(2 * Math.PI * P.wf * t);
+      // The wing beats on the pushing side too, and the trailing one is actively zeroed: leaving the
+      // old side driven while the other takes over would have both wings beating against each other.
+      set(`wing_yaw_${pushing}`, P.wy * w);
+      set(`wing_roll_${pushing}`, P.wr * w);
+      set(`wing_pitch_${pushing}`, P.wp * w);
+      for (const ax of ['yaw', 'roll', 'pitch']) set(`wing_${ax}_${trailing}`, 0);
       this.cmd.righting = true;
-    } else if (this.righting) { this.righting = false; this.recoverUntil = tMs + 300; for (const ax of ['yaw', 'roll', 'pitch']) set(`wing_${ax}_left`, 0); }
+    } else if (this.righting) {
+      // Clear BOTH wings and drop the latch, so the next flip picks its side afresh. Zeroing only
+      // the left left a driven right wing running after the reflex ended.
+      this.righting = false; this.recoverUntil = tMs + 300; this.pushSide = null;
+      for (const ax of ['yaw', 'roll', 'pitch']) for (const sd of SIDES) set(`wing_${ax}_${sd}`, 0);
+    }
     if (!this.righting && this.recoverUntil > tMs) for (const leg of LEGS) for (const sd of SIDES) {   // settle in a standing posture after righting
       for (const j of ['coxa', 'coxa_abduct', 'coxa_twist', 'femur', 'femur_twist', 'tibia', 'tarsus', 'tarsus2']) set(`${j}_${leg}_${sd}`, 0);
       set(`adhere_claw_${leg}_${sd}`, 0.8); }

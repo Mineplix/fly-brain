@@ -22,8 +22,22 @@ export const INTRINSIC = {
   groomDrive: 10,
   stopBrake: 6, feedBrake: 16, feedDrive: 10,   // inhibitory conductance on all forward DNs: flies stop actively, firmly on food
   avoidMs: 350, backDrive: 14,   // head-on contact: back off this long, then turn away
+  // Refractory and escalation for wall avoidance. Every other avoidance case had a refractory --
+  // graze 400 ms, heat 700 ms, and the flight path uses lastAvoid -- while the walking head-on
+  // case had none. An animal still touching the wall when an episode cleared re-entered on the
+  // next step, so it backed up and turned in place indefinitely. Measured 2026-09-15: a fly
+  // circling the perimeter spent 44 of 50 samples in `avoiding`, which read as standing still.
+  // The escalation matters as much as the refractory: repeating the same 500-900 ms turn against
+  // the same wall reproduces the same failure, so a chained episode turns progressively further,
+  // which is also what a fly in a corner does.
+  avoidRefractory: 600, avoidChainMs: 2500, avoidChainTurn: 0.6, avoidChainMax: 3,
   grazeTurnMs: [120, 260], grazeRefractory: 400,   // one-sided contact: turn away without stopping
   heatRefractory: 700,
+  // Escape by air from a uniformly burning substrate. burnEscape is below the 0.35 tarsal
+  // damage threshold so the animal leaves before it is badly hurt rather than after.
+  // burnFlyEarliest must clear READOUT.startupMs in motor.js (1500 ms), or the request is
+  // issued into a window where jumps are refused and is silently lost.
+  burnEscape: 0.28, burnFlyRefractory: 1200, burnFlyEarliest: 1700,
   feedBout: [6, 0.5], satiety: 0.9, searchMs: 12000, searchTurns: 3,   // feeding stop, then local search
   pTakeoff: 0.1, pTakeoffWall: 0.1, takeoffDrive: 20,   // chance a bout ends in a voluntary takeoff (more when hungry), via DNp02/DNp04
   flightSaccadeRate: 1.0, flightSaccadeMs: [80, 160], avoidAhead: 0.4, avoidDrive: 18,   // flight: avoid when the path 9 mm ahead (FlyAgent.state) comes within 4 mm of a surface
@@ -39,8 +53,8 @@ export class Intrinsic {
     this.ix = { feed: [...new Set([...pick(['MN9']), ...feeding])], takeoff: pick(TYPES.takeoff), brake: pick(TYPES.brake), fwd: pick(TYPES.fwd), turnL: pick(TYPES.turn, 1), turnR: pick(TYPES.turn, 2), groom: pick(TYPES.groom), back: pick(TYPES.back) };
     this.rand = mulberry(seed * 7919 + 17);
     this.state = 'stop'; this.left = 300 + 700 * this.rand();   // settle briefly before the first decision
-    this.fwdNoise = 0; this.sacc = null; this.sinceSacc = 0; this.avoid = null; this.t = 0; this.touchL = this.touchR = this.lastGraze = this.lastHeat = this.leftFood = this.lastAvoid = this.lastSugar = -1e9; this.avoidDir = 1; this.searchUntil = 0; this.hot = 0; this.approach = false; this.lastDir = this.rand() < 0.5 ? 1 : -1;
-    this.bias = { fwd: 0, turnL: 0, turnR: 0, groom: 0, back: 0, takeoff: 0, feed: 0 }; this.takeoffUntil = -1;
+    this.fwdNoise = 0; this.sacc = null; this.sinceSacc = 0; this.avoid = null; this.t = 0; this.touchL = this.touchR = this.lastGraze = this.lastHeat = this.leftFood = this.lastAvoid = this.lastSugar = -1e9; this.avoidDir = 1; this.lastWallAvoid = -1e9; this.wallChain = 0; this.lastBurnFly = -1e9; this.searchUntil = 0; this.hot = 0; this.approach = false; this.lastDir = this.rand() < 0.5 ? 1 : -1;
+    this.bias = { fwd: 0, turnL: 0, turnR: 0, groom: 0, back: 0, takeoff: 0, feed: 0 }; this.takeoffUntil = -1; this.urgentUntil = -1;
   }
   gauss() { let u = 0; while (!u) u = this.rand(); return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * this.rand()); }
   lognormal([median, sd]) { return 1000 * median * Math.exp(sd * this.gauss()); }
@@ -68,8 +82,15 @@ export class Intrinsic {
     }
     const headOn = ctx.rearing || (t - this.touchL < 150 && t - this.touchR < 150);
     const graze = ctx.touch.left !== ctx.touch.right;
-    if (!courting && !this.avoid && headOn) {
-      this.avoid = { t: 0, dir: this.touchL > this.touchR ? -1 : this.touchR > this.touchL ? 1 : (this.rand() < 0.5 ? 1 : -1), turn: 500 + 400 * this.rand(), why: ctx.rearing ? 'rear' : 'both' };
+    if (!courting && !this.avoid && headOn && t - this.lastWallAvoid > P.avoidRefractory) {
+      // A new episode soon after the last one means the turn did not clear the obstacle. Turn
+      // further each time rather than repeating a manoeuvre that has already failed.
+      this.wallChain = (t - this.lastWallAvoid < P.avoidChainMs) ? Math.min(P.avoidChainMax, this.wallChain + 1) : 0;
+      const esc = 1 + P.avoidChainTurn * this.wallChain;
+      this.avoid = { t: 0, dir: this.touchL > this.touchR ? -1 : this.touchR > this.touchL ? 1 : (this.rand() < 0.5 ? 1 : -1), turn: (500 + 400 * this.rand()) * esc, why: ctx.rearing ? 'rear' : 'both' };
+      // After repeated failures, commit to one direction instead of re-rolling it each time.
+      if (this.wallChain >= 2) this.avoid.dir = this.avoidDir;
+      else this.avoidDir = this.avoid.dir;
       this.sacc = null;
       this.avoid.fly = this.rand() < P.pTakeoffWall;   // or leave the wall by air, once turned away from it
     } else if (!courting && !this.avoid && graze && t - this.lastGraze > P.grazeRefractory) {
@@ -85,6 +106,52 @@ export class Intrinsic {
       if (!(even && hot > 0.9)) { this.sacc = { t: 0, dur: 300 + 300 * this.rand(), dir }; this.lastDir = dir; this.sinceSacc = 0; }
       this.lastHeat = t; this.state = 'walk'; this.left = Math.max(this.left, 1500);
     }
+    // ESCAPE BY AIR. The block above turns away from heat and runs, which is the right response to
+    // a hot PATCH. It is useless on a floor that is uniformly molten: both antennae read the same
+    // value, there is no gradient to descend, and the animal walks about on the hazard until it
+    // dies. Flies burned on a uniformly hot surface leave it, and the only way off this one is up.
+    //
+    // Gated on TARSAL heat, not antennal: the feet are what touch the substrate, the antennae sit
+    // a body-height above it, and the burn threshold in fly.js is a tarsal quantity. Requiring a
+    // flat gradient as well means a hot patch is still handled by walking, which is cheaper and is
+    // what a real fly does when there is somewhere cooler to stand.
+    //
+    // This is hand-supplied, like everything else in this module. The connectome has no path from
+    // a burning tarsus to a takeoff command -- the takeoff descending neurons it reads (DNp01,
+    // DNp02, DNp04, DNp06, DNp10) are looming-visual cells -- so an escape reflex here is a stand-in
+    // for a pathway the model does not contain, not a result produced by one.
+    // RE-ARM WHILE BURNING, and not before the motor layer will accept a jump. The first version
+    // fired once, at t = 18 ms, triggered by the arena's default hot patch before any experiment
+    // had begun -- inside the 1500 ms startup window during which motor.js refuses all jumps. The
+    // 80 ms takeoff request expired unheard, the refractory then suppressed every retry, and an
+    // animal stood burning on a molten floor with its escape reflex already spent. A reflex that
+    // can be consumed without being acted on is worse than none, because it reports as present.
+    const feet = ctx.heatFeet || 0;
+    const flat = Math.abs(ctx.heat.left - ctx.heat.right) < 0.03;
+    // UPRIGHT, or the request is refused and wasted. motor.js gates every jump on
+    // (up > 0.5 && !righting && !flying): an inverted fly cannot launch, which is correct, since a
+    // real one cannot either. The first version of this reflex did not check, so a fly that had
+    // landed on its back went on issuing takeoff requests that were refused, consuming the 1200 ms
+    // refractory each time while it burned. Observed as an animal flopping on molten ground
+    // instead of leaving it. While inverted the right behaviour is to right itself, which the
+    // righting reflex in motor.js already does, so the escape reflex simply holds its turn.
+    const upright = (ctx.up ?? 1) > 0.5;
+    const canAct = t > P.burnFlyEarliest && upright;   // past the startup lockout, and able to jump
+    if (feet > P.burnEscape && flat && canAct && t - this.lastBurnFly > P.burnFlyRefractory) {
+      this.lastBurnFly = t;
+      this.takeoffUntil = t + 160;                 // wider than the old 80 ms, which was one frame
+      // URGENT: a takeoff that overrides the contact gate in motor.js. That gate refuses to launch
+      // an animal whose antennae or body are against something, on the reasoning that a wall
+      // filling the eye is not an approaching predator. It is right for looming and wrong here.
+      // Making the scenery solid (the collision filters never matched before 2026-09-15, so props
+      // were walk-through) turned contact from rare into constant, and a burning fly standing
+      // anywhere near furniture could not leave the floor however hot it got. Measured: in an
+      // empty arena the escape fires and the animal flies to 0.78 cm; among props it walks on the
+      // lava until it dies. A fly on a hot surface tries to leave whether or not it is touching
+      // something -- that is the whole point of the reflex.
+      this.urgentUntil = t + 400;
+      this.state = 'walk'; this.left = Math.max(this.left, 1200);
+    }
     // food: a hungry fly that tastes sugar with its legs or labellum stops there to feed; once it leaves (sated,
     // or the bout ends), it searches locally with frequent turns, looping back to the spot (Dethier 1957,
     // Kim & Dickinson 2017)
@@ -99,7 +166,7 @@ export class Intrinsic {
     if (this.avoid) {
       const a = this.avoid; a.t += dtMs;
       if (a.t > P.avoidMs && !this.sacc) this.sacc = { t: 0, dur: a.turn, dir: a.dir };   // pivot away
-      if (a.t > P.avoidMs + a.turn) { if (a.fly) this.takeoffUntil = t + 80; this.avoid = null; this.lastDir = a.dir; this.sinceSacc = 0; this.state = 'walk'; this.left = Math.max(this.left, 1000); }
+      if (a.t > P.avoidMs + a.turn) { if (a.fly) this.takeoffUntil = t + 80; this.avoid = null; this.lastWallAvoid = t; this.lastDir = a.dir; this.sinceSacc = 0; this.state = 'walk'; this.left = Math.max(this.left, 1000); }
     } else if (this.state === 'court' && court) {
       // chasing: no spontaneous saccades or bout transitions; steering is set from the target's bearing below
       const b = court.bearing;   // rad; >0 = target to the left

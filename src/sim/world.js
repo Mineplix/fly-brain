@@ -17,13 +17,16 @@ export const DEFAULT_ENV = {
   humidity: 0.45,                 // ambient relative humidity; moist food raises it locally, heat dries it
   wind: [0, 0],
   threat: null,   // { x, y, z } position of the looming object (set by the host), or null
-  // Janus, the ringmaster, made physical: a hovering glowing orb. { x, y, z, glow } or null.
-  // It is a real geom in every fly's world, so the eye rays hit it and its brightness reaches
-  // the optic lobe -- the flies genuinely see it. glow (0..1) rises while it is speaking.
-  janus: null,
-  // A monster that hunts the flies. { x, y, z } or null. Like Janus it is a real geom in every
-  // fly's world, so the eye rays hit it; unlike Janus it is near-black, so it reads as a dark
-  // mass growing in the visual field -- which is what the looming/escape pathway responds to.
+  // Courtship song: the one channel flies use to address each other, and the only channel this
+  // software has ever had into them that is not light, heat, touch, odour or a looming shape.
+  //   { on, x, y, z, mode: 'pulse'|'sine', ipiMs, pulseMs, amp, r0 }  or null
+  // It has no geometry -- sound is not a body -- so nothing is added to the MuJoCo world; it is
+  // read straight off `env` by Senses. See SONG in senses.js for the transduction and why the
+  // inter-pulse interval, not the amplitude, is the part that carries meaning.
+  song: null,
+  // A predator that hunts the flies. { x, y, z } or null. It is a real geom in every fly's world,
+  // so the eye rays hit it, and it is near-black, so it reads as a dark mass growing in the visual
+  // field -- which is what the looming/escape pathway responds to.
   monster: null,
   // Whole-floor lava, 0..1. Drives the glow the host draws AND the hazard the flies feel, so the
   // two cannot drift apart. Ramped up and down by the host rather than switched.
@@ -48,8 +51,14 @@ export function buildWorldXML(flyXML, env, { flyPos = [0, 0, 0.13], flyYaw = 0, 
   const a = env.arena, parts = [];
   const W = a.shape === 'rect' ? a.w : a.radius, H = a.shape === 'rect' ? a.h : a.radius;
   parts.push(`<geom name="floor" type="plane" size="${W + 1} ${H + 1} .1" rgba=".55 .5 .42 1" friction="1" solref="0.0002 1" group="0"/>`);
+  // COLLISION FILTERING. Walls, obstacles and fly proxies were contype=2 conaffinity=2 while the
+  // fly's own collision capsules are contype=1 conaffinity=1. MuJoCo collides two geoms only when
+  // contype1 & conaffinity2 or contype2 & conaffinity1, and 1 & 2 is zero both ways, so none of the
+  // scenery collided with the animal at all -- not merely the legs. The flies appeared to respect
+  // obstacles because clearance() raycasts env.obstacles geometrically in the sensory code: they
+  // could see props they could not touch, and walked through them. Set to 1/1 so contact happens.
   const t = 0.05, wf = a.wallFriction ?? 0.1, wh = a.wallHeight;
-  const wall = (k, sx, sy, x, y, yaw) => parts.push(`<geom name="wall${k}" type="box" size="${sx} ${sy} ${wh / 2}" pos="${x.toFixed(4)} ${y.toFixed(4)} ${wh / 2}" euler="0 0 ${yaw.toFixed(4)}" rgba=".35 .35 .38 1" group="0" contype="2" conaffinity="2" friction="${wf}"/>`);
+  const wall = (k, sx, sy, x, y, yaw) => parts.push(`<geom name="wall${k}" type="box" size="${sx} ${sy} ${wh / 2}" pos="${x.toFixed(4)} ${y.toFixed(4)} ${wh / 2}" euler="0 0 ${yaw.toFixed(4)}" rgba=".35 .35 .38 1" group="0" contype="1" conaffinity="1" friction="${wf}"/>`);
   if (wh <= 0) { /* open ground: no wall at all, the fly can walk off the edge */ }
   else if (a.shape === 'rect') {
     // four slabs. Cheaper than 48 segments and it gives the flies corners, which a circle never
@@ -67,22 +76,20 @@ export function buildWorldXML(flyXML, env, { flyPos = [0, 0, 0.13], flyYaw = 0, 
   // about the vertical (o.yaw radians, boxes only) -- needed for spiral staircase treads.
   env.obstacles.forEach((o, k) => {
     const zb = o.z || 0, spin = o.yaw ? ` euler="0 0 ${o.yaw.toFixed(5)}"` : '';
-    if (o.type === 'box') parts.push(`<geom name="obst${k}" type="box" size="${o.sx} ${o.sy} ${o.sz / 2}" pos="${o.x} ${o.y} ${zb + o.sz / 2}"${spin} rgba=".25 .3 .25 1" group="0" contype="2" conaffinity="2" friction="${a.wallFriction ?? 0.1}"/>`);
-    else parts.push(`<geom name="obst${k}" type="cylinder" size="${o.r} ${o.sz / 2}" pos="${o.x} ${o.y} ${zb + o.sz / 2}" rgba=".25 .3 .25 1" group="0" contype="2" conaffinity="2" friction="${a.wallFriction ?? 0.1}"/>`);
+    if (o.type === 'box') parts.push(`<geom name="obst${k}" type="box" size="${o.sx} ${o.sy} ${o.sz / 2}" pos="${o.x} ${o.y} ${zb + o.sz / 2}"${spin} rgba=".25 .3 .25 1" group="0" contype="1" conaffinity="1" friction="${a.wallFriction ?? 0.1}"/>`);
+    else parts.push(`<geom name="obst${k}" type="cylinder" size="${o.r} ${o.sz / 2}" pos="${o.x} ${o.y} ${zb + o.sz / 2}" rgba=".25 .3 .25 1" group="0" contype="1" conaffinity="1" friction="${a.wallFriction ?? 0.1}"/>`);
   });
   // food and patches are flat visual discs (no collision), seen by the eyes
   env.food.forEach((f, k) => parts.push(`<geom name="food${k}" type="cylinder" size="${f.r} 0.002" pos="${f.x} ${f.y} 0.002" rgba=".95 .8 .3 1" contype="0" conaffinity="0" group="0"/>`));
   env.bitterPatches.forEach((f, k) => parts.push(`<geom name="bitter${k}" type="cylinder" size="${f.r} 0.002" pos="${f.x} ${f.y} 0.002" rgba=".3 .55 .85 1" contype="0" conaffinity="0" group="0"/>`));
   env.hazards.forEach((h, k) => parts.push(`<geom name="hazard${k}" type="cylinder" size="${h.r} 0.002" pos="${h.x} ${h.y} 0.002" rgba=".85 .3 .2 1" contype="0" conaffinity="0" group="0"/>`));
   // other flies: kinematic ellipsoid proxies (body + head), collide with this fly and are visible
-  for (let k = 0; k < nProxies; k++) parts.push(`<body name="proxy${k}" mocap="true" pos="${50 + k} 50 -5"><geom name="proxy${k}_body" type="ellipsoid" size="0.14 0.05 0.05" pos="-0.03 0 0" rgba=".2 .15 .1 1" group="0" contype="2" conaffinity="2"/><geom name="proxy${k}_head" type="sphere" size="0.045" pos="0.08 0 0.01" rgba=".5 .1 .08 1" group="0" contype="2" conaffinity="2"/></body>`);
+  for (let k = 0; k < nProxies; k++) parts.push(`<body name="proxy${k}" mocap="true" pos="${50 + k} 50 -5"><geom name="proxy${k}_body" type="ellipsoid" size="0.14 0.05 0.05" pos="-0.03 0 0" rgba=".2 .15 .1 1" group="0" contype="1" conaffinity="1"/><geom name="proxy${k}_head" type="sphere" size="0.045" pos="0.08 0 0.01" rgba=".5 .1 .08 1" group="0" contype="1" conaffinity="1"/></body>`);
   // a looming threat (predator / swatter): kinematic dark sphere, parked far away until launched
   parts.push(`<body name="threat" mocap="true" pos="0 0 -20"><geom name="threat_geom" type="sphere" size="0.35" rgba=".05 .05 .06 1" contype="0" conaffinity="0" group="0"/></body>`);
-  // Janus: a kinematic, non-colliding glowing sphere. Parked far below until the host places it.
-  // group="0" puts it in the ray group the eyes cast against (FlyVisionFV.groups), so it is seen.
-  parts.push(`<body name="janus" mocap="true" pos="0 0 -20"><geom name="janus_geom" type="sphere" size="0.22" rgba=".95 .12 .12 1" contype="0" conaffinity="0" group="0"/></body>`);
-  // The monster: a kinematic dark mass, non-colliding so it cannot wedge the solver, parked
-  // below the world until Janus sets one loose.
+  // The predator: a kinematic dark mass, non-colliding so it cannot wedge the solver, parked
+  // below the world until the host sets one loose. group="0" puts it in the ray group the eyes
+  // cast against (FlyVisionFV.groups), so it is genuinely seen rather than drawn.
   parts.push(`<body name="monster" mocap="true" pos="0 0 -20"><geom name="monster_geom" type="ellipsoid" size="0.34 0.26 0.24" rgba=".06 .05 .07 1" contype="0" conaffinity="0" group="0"/></body>`);
   const q = [Math.cos(flyYaw / 2), 0, 0, Math.sin(flyYaw / 2)];
   let xml = flyXML.replace('<worldbody>', `<worldbody>\n${parts.join('\n')}`);

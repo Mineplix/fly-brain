@@ -11,3 +11,21 @@ scripts/_tmp
 data/ir
 __pycache__
 bench/results/
+
+# ---- the room, and the reference it is copied from --------------------------------------------
+# Deliberately never published. `reference/` and `public/room/` are frames and textures cut from a
+# third party's video, which is not ours to redistribute; the rest is the set built from them and
+# the apparatus for experimenting on the animal, which is kept local by choice.
+reference/
+public/room/
+shots/
+room.html
+src/room.js
+src/room-page.js
+src/stands.js
+src/cages.js
+bench/shot.mjs
+bench/solve-stands.mjs
+
+# Word lock files
+~$*.docx

@@ -19,7 +19,13 @@ export const FLY_ODOR = { strength: 0.9, sigma: 0.28 };   // another fly is a sh
 // Courtship song as heard by Johnston's organ. Drosophila pulse song: ~35 ms inter-pulse
 // interval, pulses a few ms long, carrier ~250 Hz. Near-field particle velocity, so the
 // effective range is millimetres -- rangeCm 0.6 is ~6 mm, about two body lengths.
-export const SONG = { ipiMs: 35, pulseMs: 10, rangeCm: 0.6, refCm: 0.12, maxHz: 170 };
+// `wB`/`wA`/`wC` weight the Johnston's-organ subtypes. They are not interchangeable: JO-B is the
+// song-frequency channel, JO-A shares the vibration range with different tuning, and JO-C reports
+// *static* antennal deflection -- wind and gravity -- so exciting it with a song would manufacture
+// a response in cells that should be saying the air is still. The earlier version drove the whole
+// `JO auditory` group uniformly, JO-C included.
+export const SONG = { ipiMs: 35, pulseMs: 10, rangeCm: 0.6, refCm: 0.12, maxHz: 170,
+                      wB: 1.0, wA: 0.55, wC: 0.0 };
 
 export class Senses {
   constructor(bodymap, mj, model) {
@@ -57,6 +63,12 @@ export class Senses {
    * 100 Hz, reach PPL only over 103 two-hop paths through 46 intermediates -- a real route, but
    * far too thin to move a population the rule can detect.
    *
+   * TARGET SUPPORTED BY THE LITERATURE, NOT ONLY BY ARGUMENT. Electric shock, heat and bitter taste
+   * all converge on the same PPL1 neurons -- MP1, also called PPL1-gamma1pedc (Aso et al. 2014;
+   * Felsenberg et al. 2016). The two stimuli this channel carries are exactly noxious heat and
+   * bitter, so PPL1 is where they are documented to arrive, and the choice of target is better
+   * founded than the surrounding text originally claimed.
+   *
    * This supplies the missing afferent, in the same spirit as the giant-fibre -> TTMn electrical
    * synapse that world/motor already add explicitly because a chemical connectome cannot contain
    * it. It is a sensory channel, not a circuit being puppeted: noxious intensity in, firing rate
@@ -64,11 +76,92 @@ export class Senses {
    *
    * It is OFF by default. It is an addition beyond the connectome and every result that depends
    * on it has to say so.
+   *
+   * TWO BRANCHES, AND THE SECOND ONE WAS MISSING. Nociception in an insect is not one pathway.
+   * There is a *valence* branch -- "that hurt, learn from it" -- which is what PPL1 carries, and a
+   * *reflex* branch -- "that hurt, move" -- which enters the ventral nerve cord alongside the other
+   * leg and body-wall afferents and reaches motor neurons without consulting the brain. Only the
+   * first was wired here. The thermal-escape experiment of 2026-09-15 consequently measured the
+   * learning branch and reported a null about the escape branch: the descending population moved
+   * by +0.07 Hz, 95% CI [-2.36, +2.50], because nothing downstream had been given an input.
+   *
+   * WHY `unknown_sensory` IN THE VNC IS THE TARGET. The dataset classifies VNC afferents as
+   * gustatory, chemosensory, mechanosensory_tactile or mechanosensory_proprioceptive, and there is
+   * no `nociceptive` class anywhere in its vocabulary -- the same absence, one level down, that
+   * made the PPL1 injection necessary in the first place. What it does have is 1,564 vnc_sensory
+   * neurons whose modality it declines to assign. A class IV multidendritic terminal, reconstructed
+   * but unrecognised, lands in exactly that class. Three properties make it the defensible choice:
+   *
+   *   - it is the only unassigned VNC afferent class, so the choice is not among several;
+   *   - all 1,564 are driven by nothing at all -- no overlap with bodymap.sensors -- so this adds
+   *     a modality rather than competing with one already modelled;
+   *   - 297 of them synapse directly onto vnc_motor neurons (42% of the 708-cell motor pool), and
+   *     696 of 708 are within two hops. The reflex arc is present in the graph.
+   *
+   * WHAT IS WRONG WITH IT. This class certainly also contains afferents that are not nociceptive.
+   * Driving all of it treats "unclassified" as "noxious", which is false, and makes this a coarse
+   * instrument: it can show that a nociceptive drive entering the VNC produces escape, and it
+   * cannot show that *the* nociceptors do. The population was NOT selected for reaching motor
+   * neurons -- that was measured afterwards, and selecting on it would have been choosing the
+   * answer. Like the PPL1 branch, this is an addition beyond the connectome and every result that
+   * depends on it has to say so.
+   *
+   * @returns {{ppl:number, vnc:number}} population sizes, for the caller to report
    */
-  bindNociceptors(typeOf) {
+  bindNociceptors(typeOf, clsOf, scOf, meta) {
     this.ppl = [];
     for (let i = 0; i < typeOf.length; i++) if ((typeOf[i] || '').startsWith('PPL')) this.ppl.push(i);
-    return this.ppl.length;
+    // reflex branch: VNC afferents of unassigned modality
+    this.nociVnc = [];
+    const scNames = meta?.superclasses || [], clsNames = meta?.classes || [];
+    const scVnc = scNames.indexOf('vnc_sensory'), clUnk = clsNames.indexOf('unknown_sensory');
+    if (scVnc >= 0 && clUnk >= 0 && scOf && clsOf) {
+      for (let i = 0; i < scOf.length; i++) if (scOf[i] === scVnc && clsOf[i] === clUnk) this.nociVnc.push(i);
+    }
+    return { ppl: this.ppl.length, vnc: this.nociVnc.length };
+  }
+
+  /**
+   * Correct the VP1m / VP1l assignments before anything reads them.
+   *
+   * `bodymap.json` places TRN_VP1m in the thermosensory group and HRN_VP1l in the hygrosensory
+   * group. The published characterisation has them the other way round, and the evidence is
+   * receptor expression rather than opinion:
+   *
+   *   VP1m expresses Ir68a, the receptor that defines VP5 as the humid-air glomerulus.
+   *        Marin et al. (2020): "VP1m might represent humidity, with confirmation awaiting
+   *        future physiological and behavioral experiments."
+   *   VP1l expresses Ir21a, the receptor that defines VP3 as the cooling glomerulus.
+   *        Marin et al.: "Ir21a ... was expressed in VP1l RNs, suggesting that they may be
+   *        cooling responsive."
+   *
+   * The consequence of leaving it was not cosmetic. VP1m is 11 of the 25 neurons in the
+   * thermosensory channel, so 44% of the thermal input used in five thermal-escape experiments
+   * was a humidity channel being driven by heat, while the 8 genuinely cooling-responsive cells
+   * were being driven by humidity.
+   *
+   * WHY THIS LIVES IN CODE AND NOT IN THE DATA FILE. bodymap.json is generated, carries no
+   * provenance of any kind, and would silently revert on regeneration. Remapping at bind time
+   * survives that, and keeps the disagreement between the code and its own data file visible
+   * rather than buried in a JSON blob.
+   *
+   * THE AUTHORS HEDGE AND SO DO WE. Marin et al. describe these as "provisional identifications
+   * based on receptor expression patterns rather than confirmed functional characterizations".
+   * This remap is better supported than the assignment it replaces; neither is settled.
+   */
+  // Full audit of every bodymap group: docs/25-bodymap-provenance.md
+  fixVPAssignments(typeOf) {
+    const moved = { toThermo: 0, toHygro: 0 };
+    for (const sd of ['left', 'right']) {
+      const th = this.S[`thermosensory ${sd}`], hy = this.S[`hygrosensory ${sd}`];
+      if (!th || !hy) continue;
+      const isVP1m = i => /VP1m/.test(typeOf[i] || ''), isVP1l = i => /VP1l/.test(typeOf[i] || '');
+      const vp1m = th.filter(isVP1m), vp1l = hy.filter(isVP1l);
+      this.S[`thermosensory ${sd}`] = th.filter(i => !isVP1m(i)).concat(vp1l);
+      this.S[`hygrosensory ${sd}`] = hy.filter(i => !isVP1l(i)).concat(vp1m);
+      moved.toHygro += vp1m.length; moved.toThermo += vp1l.length;
+    }
+    return moved;
   }
 
   bindTypes(typeOf, sideOf, nerveLegOf) {
@@ -82,6 +175,19 @@ export class Senses {
     }
     this.orn = {}; // glomerulus -> {left: idx[], right: idx[]}
     for (const s of this.bm.sensors) if (s.kind === 'odor') { (this.orn[s.glomerulus] ||= {})[s.antenna] = s.idx; }
+    // Johnston's organ, split by subtype so a song excites the song cells. See SONG.
+    // VP1m/VP1l corrected against Marin et al. (2020) before any channel reads these groups.
+    this.vpFix = this.fixVPAssignments(typeOf);
+
+    this.jo = { left: { B: [], A: [], C: [] }, right: { B: [], A: [], C: [] } };
+    for (const sd of ['left', 'right']) {
+      for (const i of (this.S[`JO auditory ${sd}`] || [])) {
+        const t = typeOf[i] || '';
+        const k = /^JO-B/.test(t) ? 'B' : /^JO-C/.test(t) ? 'C' : /^JO-A/.test(t) ? 'A' : 'A';
+        this.jo[sd][k].push(i);
+      }
+    }
+    this._songT = 0;
   }
   set(ix, hz) { for (const i of ix) { const r = this.rates.get(i) || 0; if (hz > r) this.rates.set(i, hz); } }
   static hill(c, k = 0.3, n = 1.5) { return c <= 0 ? 0 : Math.pow(c, n) / (Math.pow(c, n) + Math.pow(k, n)); }
@@ -159,16 +265,37 @@ export class Senses {
     // The carrier (~250 Hz) is far above what a 1 ms step can represent, but the pulse train is
     // not: pulses are ~10 ms at ~35 ms intervals, and that interval is the species-recognition
     // cue, so it is modelled explicitly.
-    this.songPhase = (this.songPhase + dtMs) % SONG.ipiMs;
-    if (this.songPhase < SONG.pulseMs) {
-      for (const o of st.otherFlies) {
-        if (!o.singing) continue;
+    // Singers are other flies plus, when Janus has something to say, Janus. He is given no
+    // special channel: he sings into the same antennae, over the same near-field range, with the
+    // same inter-pulse interval that carries species identity. English text reaches the human
+    // watching and no part of the fly, so this is the only way an instruction from him is
+    // something the animal can actually receive.
+    const singers = [];
+    for (const o of st.otherFlies) if (o.singing) singers.push({ x: o.x, y: o.y, z: o.z ?? 0.13, ipi: SONG.ipiMs, amp: 1 });
+    const sg = env.song;
+    if (sg && sg.on) singers.push({ x: sg.x, y: sg.y, z: sg.z ?? 0.13,
+                                    ipi: sg.ipiMs || SONG.ipiMs, amp: sg.amp ?? 1, mode: sg.mode });
+    st.song = 0;
+    if (singers.length) {
+      this.songPhase = (this.songPhase + dtMs) % SONG.ipiMs;
+      for (const o of singers) {
+        // Sine song is continuous; pulse song is a train, and the GAP is the signal. A singer with
+        // its own inter-pulse interval keeps its own phase, because two IPIs is two utterances.
+        const on = o.mode === 'sine' ? true
+          : (o.ipi === SONG.ipiMs ? this.songPhase < SONG.pulseMs
+                                  : (this._t2 = ((this._t2 || 0) + dtMs)) % o.ipi < SONG.pulseMs);
+        if (!on) continue;
         for (const sd of ['left', 'right']) {
           const a = st.antenna[sd];
-          const d = Math.hypot(a[0] - o.x, a[1] - o.y, a[2] - (o.z ?? 0.13));
+          const d = Math.hypot(a[0] - o.x, a[1] - o.y, a[2] - o.z);
           if (d > SONG.rangeCm) continue;
           const r = Math.max(d, SONG.refCm);
-          this.set(this.S[`JO auditory ${sd}`] || [], Math.min(SONG.maxHz, SONG.maxHz * (SONG.refCm / r) ** 2));
+          const hz = Math.min(SONG.maxHz, SONG.maxHz * o.amp * (SONG.refCm / r) ** 2);
+          const jo = this.jo[sd];
+          if (SONG.wB) this.set(jo.B, hz * SONG.wB);
+          if (SONG.wA) this.set(jo.A, hz * SONG.wA);
+          if (SONG.wC) this.set(jo.C, hz * SONG.wC);
+          st.song = Math.max(st.song, hz / SONG.maxHz);
         }
       }
     }
@@ -184,7 +311,14 @@ export class Senses {
       const noxBitter = bit > NOCI.floor ? Senses.hill(bit, NOCI.bitterK, 2.0) * NOCI.bitterHz : 0;
       const nox = Math.max(noxHeat, noxBitter);
       if (nox > 0) this.set(this.ppl, nox);
+      // reflex branch: the same noxious intensity onto the VNC afferent population, scaled to its
+      // own rate. `nox` is already in Hz on the PPL scale, so convert back to the 0..1 fraction.
+      if (nox > 0 && this.nociVnc && this.nociVnc.length) {
+        this.set(this.nociVnc, (nox / NOCI.hz) * NOCI.vncHz);
+      }
     }
+    st.nox = (this.ppl && this.ppl.length && st.heat > NOCI.floor)
+      ? Senses.hill(st.heat, NOCI.heatK, 2.0) : 0;
     // humidity: the 65 hygrosensory neurons sit in the antenna next to the thermosensory ones and
     // were never driven. The bodymap pools moist and dry cells into one group per side, so only
     // the moist response is modelled, and it is driven by the rise *above ambient* rather than by
@@ -299,7 +433,12 @@ export function humidityAt(p, env) {
 // PPL1; `bitter` weights a noxious tastant against noxious heat. Values are chosen so that heat
 // 0.5 -- the damage threshold, and the only punishment level safe to leave on -- produces a
 // clear phasic rise without pinning the population, NOT fitted to physiology.
-export const NOCI = { heatK: 0.22, hz: 130, bitterK: 0.35, bitterHz: 90, floor: 0.06 };
+// `vncHz` is the saturating rate onto the VNC afferent population (see bindNociceptors). It is a
+// separate knob from `hz` because the two branches are different things: `hz` drives a modulatory
+// cluster of ~24 cells, `vncHz` drives ~1,564 primary afferents sitting one synapse from 42% of
+// the motor pool. They should not share a magnitude.
+export const NOCI = { heatK: 0.22, hz: 130, bitterK: 0.35, bitterHz: 90, floor: 0.06, vncHz: 130 };
+
 
 /**
  * Floor heat at a point, INCLUDING its height.
