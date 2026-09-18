@@ -83,6 +83,7 @@ onmessage = async (e) => {
     for (let i = 0; i < d.qvel.length; i++) d.qvel[i] = 0;
     fly.mj.mj_forward(fly.model, d);
     fly.motor.righting = false; fly.motor.invertedMs = 0;   // start the reflex from a clean state
+    fly.motor.pushSide = null;                              // and from an unlatched side -- see below
     postPose();
   }
   // Adjust a reflex constant at runtime, so a harness can measure the SAME animal in the same
@@ -203,7 +204,7 @@ function postPose() {
   lastPose = performance.now();
   const p = fly.pose(); const st = fly.state();
   postMessage({ type: 'pose', id: fly.id, t: fly.t, xpos: p.xpos, xquat: p.xquat, cmd: fly.cmd, energy: fly.energy, health: fly.health, alive: fly.alive, eaten: fly.eaten, takeoffPending:fly.takeoffPending,
-    mn9: fly.motor.mean(fly.motor.muscles.find(x => x.name.startsWith('MN9'))?.idx || []), feeding: fly.motor.feeding(), heat: fly.heatFelt ?? st.heat ?? 0, heatFeet: fly.heatFeetFelt || 0, harm: fly.lastHarm || null, dbg: fly.intrinsic ? { toUntil: fly.intrinsic.takeoffUntil|0, t: fly.intrinsic.t|0, lastBurnFly: fly.intrinsic.lastBurnFly|0, hot: +(fly.intrinsic.hot||0).toFixed(3),
+    mn9: fly.motor.mean(fly.motor.muscles.find(x => x.name.startsWith('MN9'))?.idx || []), feeding: fly.motor.feeding(), heat: fly.heatFelt ?? st.heat ?? 0, heatFeet: fly.heatFeetFelt || 0, harm: fly.lastHarm || null, dbg: fly.intrinsic ? { toUntil: fly.intrinsic.takeoffUntil|0, t: fly.intrinsic.t|0, lastBurnFly: fly.intrinsic.lastBurnFly|0, hot: +(fly.intrinsic.hot||0).toFixed(3), pushSide: fly.motor.pushSide || null,
       urgentUntil: fly.intrinsic.urgentUntil|0, veto: fly.motor.jumpVeto || null, vetoT: fly.motor.jumpVetoT|0 } : null, song: fly.songHeard || 0, nSensory: fly.driven.length,
     foodEaten: fly.foodEaten.splice(0, fly.foodEaten.length, ...fly.foodEaten.map(() => 0)), behavior: fly.behavior(st), singing: !!fly.cmd?.singing, drive: fly.intrinsic?.label(), nm: fly.neuromod?.readout(), mb: fly.mb ? { warm: fly.mb._age > fly.mb.p.warmupMs, kc: +fly.mb.stats.kcDrive.toFixed(2), dan: +fly.mb.stats.danDrive.toFixed(2), edges: fly.mb.stats.edges, learning: fly.mb.dirty, depressed: fly.mb.stats.depressed, maxDep: +fly.mb.stats.maxDepress.toFixed(3), meanDep: +fly.mb.stats.meanDepress.toFixed(5), mbon: +fly.mb.stats.mbonDrive.toFixed(2), mExc: +fly.mb.stats.mbonExc.toFixed(2), mInh: +fly.mb.stats.mbonInh.toFixed(2), mAver: +fly.mb.stats.mbonAver.toFixed(2), mAppet: +fly.mb.stats.mbonAppet.toFixed(2), phasic: +fly.mb.stats.phasicMax.toFixed(4), peak: +fly.mb.stats.phasicPeak.toFixed(4), gate: +fly.mb.stats.gate.toFixed(3), popRel: +fly.mb.stats.popRel.toFixed(3), pop: +fly.mb.stats.pop.toFixed(2), popFast: +fly.mb.stats.popFast.toFixed(2), popBase: +fly.mb.stats.popBase.toFixed(2), popAv: +fly.mb.stats.popAv.toFixed(2), avRel: +fly.mb.stats.avRel.toFixed(3) } : null, flying: fly.flight.active, flights: fly.flights, dist: fly.dist, jumps: fly.jumps, pos: st.pos, up: +fly.mjd.xmat[fly.bid.thorax * 9 + 8].toFixed(3),
     roll: +fly.mjd.xmat[fly.bid.thorax * 9 + 7].toFixed(3), yaw: Math.atan2(fly.mjd.xmat[fly.bid.thorax * 9 + 3], fly.mjd.xmat[fly.bid.thorax * 9]) }, [p.xpos.buffer, p.xquat.buffer]);

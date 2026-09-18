@@ -56,8 +56,54 @@ const JUMP = { pre: 30, push: 20, f2: 0.7, t2: 0.5, f3: 0.4, f1: 0.5, fly: 80 };
 export const RIGHT = { f: 6, aL: 1.0, aR: 0.3, tib: 0.5, abd: 0.5, wy: 1.0, wr: -1.0, wp: -1.0, wf: 4,
                 commitAt: -0.25,   // `up` past which the reflex stops rocking and holds the push
                 sideLatch: 0.15,   // |roll| needed to re-pick the pushing side once one is chosen
-                mirror: 1 };       // 0 pins the push to the left, i.e. the old fixed-side reflex
+                mirror: 1,         // 0 pins the push to the left, i.e. the old fixed-side reflex
                                    // -- the control arm for bench/probe-righting.mjs
+                // THE CONTROL ARM THAT WAS MISSING. Four attempts at this reflex compared tunings
+                // against other tunings and never against NOTHING, so no run ever established that
+                // the drive moves the animal at all. `off` disables the reflex entirely and leaves
+                // the flip to physics, which is the baseline every one of those comparisons needed.
+                off: 0,
+                // COMMIT FREEZES lph AT pi/2 FOR ALL SIX LEGS, so `sin(lph) > 0` below is true for
+                // every one of them and the animal grips the floor with all six claws for the whole
+                // of the commit -- the exact phase in which the body has to rotate. That is the
+                // suspect for why the reflex lifts past horizontal and then cannot finish.
+                // 1 keeps the grip (the behaviour as measured); 0 releases it while committed.
+                //
+                // MEASURED 2026-09-18, 8 paired drops, side-selected vs the same with the grip
+                // released (bench/righting-rig.mjs 8 side,release):
+                //
+                //     grip held     2/8 righted, mean max up 0.639
+                //     grip released 5/8 righted, mean max up 0.741
+                //     discordant pairs 3, ALL favouring release; exact McNemar p = 0.250
+                //
+                // The three rescues are plateau-and-fall failures completing: 0.570 -> 0.803,
+                // 0.537 -> 0.801, 0.656 -> 0.811. Both arms engaged 8/8 and pushed right 5/8,
+                // identically, so the grip was the only difference between them.
+                //
+                // CONFIRMED at the powered N. `node bench/righting-rig.mjs 16 ships,grip`,
+                // 16 paired drops, identical initial conditions, grip the only difference:
+                //
+                //     grip released  11/16 righted, mean max up 0.755
+                //     grip held       5/16 righted, mean max up 0.639
+                //     discordant 6, ALL favouring release; exact McNemar p = 0.031
+                //
+                //     by landing flank      left flank up        right flank up
+                //       grip released       8/8  max up 0.816    3/8  max up 0.694
+                //       grip held           5/8  max up 0.766    0/8  max up 0.512
+                //
+                // Releasing the grip rights every left-flank-up drop and recovers three of the
+                // right-flank-up class, which the held grip never righted at all. Both arms
+                // engaged 16/16 and pushed right 8/16, identically.
+                //
+                // The mechanism is in the two lines above: lph is frozen at pi/2 for all six legs,
+                // so `sin(lph) > 0` holds every claw down for the whole commit and the animal
+                // anchors the floor with the legs it has to roll over. `commitGrip: 1` reproduces
+                // the old behaviour as a control arm.
+                //
+                // Measured with the brain silent (see bench/righting-rig.mjs). Whether it survives
+                // in the page, where descending drive is also acting, is bench/probe-righting.mjs
+                // and has not been run.
+                commitGrip: 0 };
 const PIVOT = { turn: 0.25, amp: 0.55, inner: -0.7 };   // turning on the spot
 const PHASE = { T1_left: 0, T2_right: 0, T3_left: 0, T1_right: Math.PI, T2_left: Math.PI, T3_right: Math.PI };
 
@@ -289,7 +335,7 @@ export class Motor {
     // --- righting reflex ---
     const up = extra.up ?? 1;
     this.invertedMs = up < -0.3 && !this.flying ? (this.invertedMs || 0) + dtMs : 0;
-    if (this.invertedMs > 150 || (this.righting && up < 0.8)) {
+    if (!RIGHT.off && (this.invertedMs > 150 || (this.righting && up < 0.8))) {
       this.righting = true; const t = tMs / 1000, P = RIGHT;
       // PUSH WITH THE FLANK THAT IS RAISED, not with the left.
       //
@@ -299,10 +345,35 @@ export class Motor {
       //     lying on the RIGHT (left flank up)   3 of 5 got past horizontal, 1 righted
       //     lying on the left  (right flank up)  0 of 6 got past horizontal, 0 righted
       //
-      // So the left-strong drive is CORRECT for a right-side-down animal -- the raised legs swing
-      // over the top and plant beyond the body to lever it -- and simply has no working mode for the
-      // other half of trials, where the legs it drives are the ones pinned underneath. Pushing with
-      // the pinned side lifts that flank and rolls the animal back onto its spine.
+      // That reading suggested the left-strong drive simply had no working mode for the other half
+      // of trials, and that pushing with the raised side would rescue them.
+      //
+      // IT DOES NOT. Measured 2026-09-18 with bench/righting-rig.mjs, 10 drops run twice from
+      // IDENTICAL initial conditions, once with this selection and once pinned left:
+      //
+      //     side-selected 3/10      fixed-left 3/10      NO DISCORDANT PAIRS
+      //     side-selected pushed RIGHT on 6 of 10, fixed-left on 0 of 10
+      //
+      // The selection engages, picks a different side from the control on six of ten drops, and
+      // changes nothing: the three successes were bit-identical in both arms. The failures all
+      // reach `up` of about 0.51 to 0.61 -- past horizontal -- and fall back, whichever side
+      // pushes.
+      //
+      // THE REFLEX ITSELF WORKS. RIGHT.off, the control no previous attempt ever ran, was measured
+      // on the same six drops:
+      //
+      //     reflex off   max up -0.676 to -0.684 on 6 of 6 -- it never leaves its back
+      //     reflex on    max up  0.425 to  0.836, and every success in the whole run
+      //
+      // So the drive is worth about 1.2 in `up` on every single drop and is responsible for all
+      // the righting there is. It is neither dead nor too weak, which is what three of the four
+      // previous attempts assumed when they raised gains. What it does not do is FINISH: it lifts
+      // the animal past horizontal and then cannot carry it through the last third of the roll,
+      // and that failure is indifferent to which side pushes.
+      //
+      // The selection is LEFT IN PLACE rather than reverted. It costs nothing measurable, and
+      // removing it on 10 drops whose rolls all clustered near +/-0.70 would be as unevidenced as
+      // adopting it was.
       //
       // roll is xmat[7], the world-z component of the body's y axis, and local +y is the animal's
       // LEFT. roll > 0 therefore means the left flank is raised, and the left is the side to push
@@ -341,7 +412,7 @@ export class Motor {
         set(`coxa_abduct_${leg}_${sd}`, R[`coxa_abduct_${leg}_${sd}`][0] * P.abd * (sd === pushing ? 1 : 0.2));
         // Claws grip on the push half only. While committed the pushing legs hold their grip, which
         // is what lets the animal lever itself over rather than skating.
-        set(`adhere_claw_${leg}_${sd}`, Math.sin(lph) > 0 ? 1 : 0);
+        set(`adhere_claw_${leg}_${sd}`, committed && !P.commitGrip ? 0 : (Math.sin(lph) > 0 ? 1 : 0));
       }
       const w = committed ? 1 : 0.5 + 0.5 * Math.sin(2 * Math.PI * P.wf * t);
       // The wing beats on the pushing side too, and the trailing one is actively zeroed: leaving the
