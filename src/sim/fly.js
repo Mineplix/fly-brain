@@ -34,6 +34,21 @@ const BITE = { reach: 0.42, rate: 0.9 };
 
 const Rt9 = (xm, b) => [xm[b * 9], xm[b * 9 + 3], xm[b * 9 + 6]];   // body x axis (heading) in world frame
 
+// ---- PHASE TIMING ----------------------------------------------------------------------------
+// `PROF.on` is null unless someone is measuring, so a normal run pays one null check per phase.
+// This times the REAL step in place. The `profile` message in the worker re-implements an
+// abbreviated step instead, which is why it reported 2.0 ms per simulated ms while the live loop
+// was spending 28 -- it was timing a different, smaller thing and calling it the step.
+export const PROF = { on: null };
+export const PHASES = ['state', 'senses', 'vision', 'driveClear', 'intrinsic', 'driveSet',
+                       'brain', 'readBrain', 'motor', 'physics', 'mushroom', 'physiology'];
+export function profStart() {
+  const o = { steps: 0, t0: performance.now(), nRates: 0, nEye: 0, nChanged: 0, nOverlap: 0, nSamp: 0 };
+  for (const k of PHASES) o[k] = 0;
+  PROF.on = o; return o;
+}
+export function profStop() { const o = PROF.on; PROF.on = null; return o; }
+
 export class FlyAgent {
   constructor({ mj, flyXML, env, data, size, sign, bodymap, gait, id = 0, pos = [0, 0], yaw = 0, nProxies = 0, mode = 'descending', brainOpts = {}, vision = true, brain = null, flyvis = null, intrinsic = true, seed = 0, neuromod = null, sex = 'm', look = null, mushroom = null, learn = true, etaMul = 1, mbParams = null, noci = false, dnAll = false }) {
     this.id = id; this.mj = mj; this.env = env; this.data = data; this.vision = vision; this.sex = sex;
@@ -144,21 +159,41 @@ export class FlyAgent {
   /** advance 1 ms of simulated time */
   step() {
     if (!this.alive) return;
+    const _p = PROF.on; let _a = _p ? performance.now() : 0;
+    const _t = _p ? (k) => { const n = performance.now(); _p[k] += n - _a; _a = n; } : () => {};
     const mj = this.mj, M = this.model, d = this.mjd;
     const th = this.env.threat, tm = this.threatMocap * 3;
     if (th) { d.mocap_pos[tm] = th.x; d.mocap_pos[tm + 1] = th.y; d.mocap_pos[tm + 2] = th.z; } else if (d.mocap_pos[tm + 2] > -10) d.mocap_pos[tm + 2] = -20;
     const mo = this.env.monster, mm = this.monsterMocap * 3;
     if (mo) { d.mocap_pos[mm] = mo.x; d.mocap_pos[mm + 1] = mo.y; d.mocap_pos[mm + 2] = mo.z; } else if (d.mocap_pos[mm + 2] > -10) d.mocap_pos[mm + 2] = -20;
     const st = this.state();
+    _t('state');
     const rates = this.senses.update(st, this.env, 1); this._sugar = st.sugar;
+    _t('senses');
     // `state()` builds a fresh st each call, so anything Senses writes onto st is gone by the time
     // postPose() runs. Keep the scalars the host wants to display on the agent itself.
     this.heatFelt = st.heat || 0; this.songHeard = st.song || 0;
-    if (this.eye && (this.t % 10 === 0)) { this._eyeRates = new Map(); const er = this._eyeRates; this.eye.update({ set: (ix, hz) => { for (const i of ix) er.set(i, hz); } }, this.env, 10, this.albedo); }
-    if (this.fv && (this.t % 20 === 0)) { this._eyeRates = new Map(); const er = this._eyeRates; this.fv.update((ix, hz) => { for (const i of ix) er.set(i, hz); }, this.env, this.albedo, 20); }
-    if (this._eyeRates) for (const [i, hz] of this._eyeRates) rates.set(i, hz);
-    // apply sensory drive (clear neurons no longer driven)
-    const B = this.brain; for (const i of this.driven) B.setDriveOne(i, 0);
+    if (this.eye && (this.t % 10 === 0)) { this._eyeRates = new Map(); const er = this._eyeRates; this.eye.update({ set: (ix, hz) => { for (const i of ix) er.set(i, hz); } }, this.env, 10, this.albedo); this._eyeDirty = true; }
+    if (this.fv && (this.t % 20 === 0)) { this._eyeRates = new Map(); const er = this._eyeRates; this.fv.update((ix, hz) => { for (const i of ix) er.set(i, hz); }, this.env, this.albedo, 20); this._eyeDirty = true; }
+    if (_p && this.t % 47 === 3 && this._eyeRates) {
+      let ov = 0; for (const i of this._eyeRates.keys()) if (rates.has(i)) ov++;
+      _p.nOverlap += ov;
+    }
+    // VISION IS NOT COPIED THROUGH `rates` ANY MORE.
+    //
+    // The optic lobe drives ~28,400 neurons and refreshes every 10 or 20 simulated ms. Merging it
+    // into the per-millisecond rate map meant walking those 28,400 entries twice every single
+    // millisecond -- once to copy them in, once to write them to the brain -- to re-send numbers
+    // that had not changed 9 times out of 10. That copy and the write it caused were two thirds of
+    // the whole simulation step.
+    //
+    // Measured with nOverlap: nothing else drives a neuron the eye drives, so vision can be written
+    // on its own cadence. `rates` still wins where the two ever do meet, because the rates loop
+    // below runs after this one -- the same precedence the merge gave it.
+    _t('vision');
+    // apply sensory drive
+    const B = this.brain;
+    _t('driveClear');
     if (this.neuromod) this.neuromod.update(1, this.energy, this.flight.active ? 1 : this.motor.stepAmp || 0);
     // courtship context for a male: the nearest other fly's range and bearing in his head frame, plus the
     // connectome's own courtship-circuit readout (pIP10, DNp13) from the previous step
@@ -181,7 +216,9 @@ export class FlyAgent {
         if (Math.abs(bearing) < 2.2 && dd < 3 && angular > 0.04) {
           const hz = Math.min(140, 200 * angular);         // saturating small-object response
           const pool = this.lc10[bearing > 0 ? 'left' : 'right'];
-          for (let k = 0; k < pool.length; k += 4) if ((rates.get(pool[k]) || 0) < hz) rates.set(pool[k], hz);   // ~1/4 of the column: the object covers part of the visual field
+          // consult the eye map as well as `rates`: vision is no longer merged into `rates`, so
+          // reading only `rates` here would lose the eye's own contribution to the comparison
+          for (let k = 0; k < pool.length; k += 4) if ((rates.get(pool[k]) ?? this._eyeRates?.get(pool[k]) ?? 0) < hz) rates.set(pool[k], hz);   // ~1/4 of the column: the object covers part of the visual field
         }
       }
     }
@@ -191,13 +228,58 @@ export class FlyAgent {
     if (this.intrinsic) this.intrinsic.update(1, B, { energy: this.energy, arousal: this.neuromod?.arousal, touch: st.antTouch, rearing: st.pitchUp > 0.45 && this.motor.jumpT < 0 && !this.motor.righting,
       heat: { left: heatAt(st.antenna.left, this.env), right: heatAt(st.antenna.right, this.env) }, heatFeet: this.heatFeetFelt || 0, up: this.mjd.xmat[this.bid.thorax * 9 + 8], sugar: this._sugar || 0, flying: this.flight.active, ahead: st.ahead, court,
       mouthOnFood: this.env.food.some(f => f.amount > 0 && Math.hypot(st.labellum[0] - f.x, st.labellum[1] - f.y) < f.r - 0.02) });
-    const nd = new Int32Array(rates.size); let k = 0; for (const [i, hz] of rates) { B.setDriveOne(i, hz); nd[k++] = i; } this.driven = nd;
+    _t('intrinsic');
+    // WRITE ONLY WHAT CHANGED.
+    //
+    // This used to clear every driven neuron to 0 and then write every rate back, every simulated
+    // millisecond. setDriveOne already skips a write when the rate is unchanged -- but clearing
+    // first defeats that guard, because 0 always differs from the old rate and the old rate always
+    // differs from 0. So each driven neuron queued TWO GPU deltas per millisecond whether or not
+    // anything about it had changed.
+    //
+    // Most of them had not. The flyvis optic lobe refreshes on a 20 ms cadence and its rates are
+    // cached in _eyeRates in between, so ~19 out of every 20 milliseconds re-sent thousands of
+    // identical numbers. Measured over a 20 s window: clear + set was 47% of the entire simulation
+    // step -- 13.6 ms of the 29 ms each simulated millisecond cost -- against 14% for the physics
+    // and 12% for the brain itself.
+    //
+    // Setting first and then zeroing only the neurons that dropped out leaves exactly the same
+    // state: drive[i] = rates[i] for everything in rates, 0 for everything that left it.
+    const er = this._eyeRates;
+    if (this._eyeDirty) {
+      for (const [i, hz] of er) B.setDriveOne(i, hz);
+      // neurons the eye drove last refresh and does not drive now
+      if (this.drivenEye) for (const i of this.drivenEye) if (!er.has(i)) B.setDriveOne(i, 0);
+      this.drivenEye = Int32Array.from(er.keys());
+      this._eyeDirty = false;
+    }
+    const nd = new Int32Array(rates.size); let k = 0; for (const [i, hz] of rates) { B.setDriveOne(i, hz); nd[k++] = i; }
+    // A neuron that leaves `rates` goes back to whatever the eye is driving it with, not to silence
+    // -- otherwise a one-millisecond LC10 command would switch off a photoreceptor until the next
+    // optic-lobe refresh.
+    for (const i of this.driven) if (!rates.has(i)) B.setDriveOne(i, er && er.has(i) ? er.get(i) : 0);
+    this.driven = nd;
+    _t('driveSet');
+    // HOW MUCH OF THAT WRITE WAS NEW? Sampled every 50th step so the counting does not distort the
+    // timing it is meant to explain. `changed` is what the GPU actually had to be told; `rates` is
+    // what we walked to find it out. A large gap between them means the cost is the bookkeeping,
+    // not the data.
+    if (_p && this.t % 47 === 3) {
+      // fround, for the same reason setDriveOne needs it: `drive` is a Float32Array, so comparing
+      // its read-back against a double reports every value as changed
+      let ch = 0; for (const [i, hz] of rates) if (B.drive[i] !== Math.fround(hz)) ch++;
+      const erc = this._eyeRates;
+      _p.nRates += rates.size; _p.nEye += erc ? erc.size : 0; _p.nChanged += ch; _p.nSamp++;
+      _a = performance.now();   // do not bill the counting to any phase
+    }
     // GF -> TTMn electrical synapse (not in the chemical connectome): GF spikes depolarise TTMn directly
     const before = this.brain.spikeCount[this.motor.dn.escape[0]] + this.brain.spikeCount[this.motor.dn.escape[1]];
     this.brain.step(); this.brain.step();
+    _t('brain');
     const after = this.brain.spikeCount[this.motor.dn.escape[0]] + this.brain.spikeCount[this.motor.dn.escape[1]];
     if (after > before) this.brain.pulse(this.motor.ttmn, 20);
     this.motor.readBrain(this.brain.spikeCount, 1);
+    _t('readBrain');
     // escape gating: a static surface the fly is walking up to, touching, or backing away from looms on the eye,
     // its own pivots sweep the scene across the eye, and grooming legs pass over it. Touch, optic flow that matches
     // its own translation, and efference copies of its movements (Kim et al. 2015) tell the brain none is a predator.
@@ -224,11 +306,16 @@ export class FlyAgent {
       if (this.flight.update(this.t, 1, { turn: this.cmd.turn, env: this.env, others: this.others, legTouch }) === 'landed') this.motor.recoverUntil = this.t + 300;
       this.cmd.flying = this.flight.active; this.cmd.flight = this.flight.label();
     }
+    _t('motor');
     const dtSub = 1000 * M.opt.timestep;
     for (let s = 0; s < this.physPerMs; s++) { if (this.flight.active) this.flight.substep(dtSub); mj.mj_step(M, d); }
+    _t('physics');
     this.mb?.step(1);            // associative memory: reads traces, injects learned depression
+    _t('mushroom');
     this.t += 1;
     this.physiology(st);
+    _t('physiology');
+    if (_p) _p.steps++;
   }
   physiology(st) {
     const dt = 0.001;

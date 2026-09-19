@@ -303,10 +303,26 @@ export class LIFGpu {
   }
 
   get nAwake() { return this.N; }
-  setDriveOne(i, rate) { if (this.drive[i] !== rate) { this.drive[i] = rate; this._pushDelta(i, DELTA_DRIVE, rate); } if (rate > 0) { if (!this.drivenSet.has(i)) { this.drivenSet.add(i); this._drivenDirty = true; } } else if (this.drivenSet.delete(i)) this._drivenDirty = true; }
+  // Math.fround before comparing. `drive` is a Float32Array, so `this.drive[i]` reads back a value
+  // that has been rounded to single precision, while `rate` arrives as a double. For any rate that
+  // is not exactly representable in float32 -- which is nearly every firing rate the senses produce
+  // -- the two are never equal, so this guard never fired and every neuron queued a GPU delta every
+  // simulated millisecond. Measured: ~32,000 writes per simulated ms, of which almost none carried
+  // new information.
+  setDriveOne(i, rate) {
+    const r = Math.fround(rate);
+    // Unchanged value, nothing to do -- and that includes the drivenSet, because membership is a
+    // function of the value: if the rate did not change, whether it is above zero did not either.
+    // Returning here skips a Set lookup per neuron per millisecond, and the senses re-send the same
+    // rate for almost every neuron almost every millisecond.
+    if (this.drive[i] === r) return;
+    this.drive[i] = r; this._pushDelta(i, DELTA_DRIVE, r);
+    if (r > 0) { if (!this.drivenSet.has(i)) { this.drivenSet.add(i); this._drivenDirty = true; } }
+    else if (this.drivenSet.delete(i)) this._drivenDirty = true;
+  }
   setDrive(ix, rate) { for (const i of ix) this.setDriveOne(i, rate); }
   setBias(ix, mv) { for (const i of ix) { this.bias[i] = mv; this._pushDelta(i, DELTA_BIAS, mv); } }
-  setThr(i, mv) { if (this.thr[i] !== mv) { this.thr[i] = mv; this._pushDelta(i, DELTA_THR, mv); } }
+  setThr(i, mv) { const v = Math.fround(mv); if (this.thr[i] !== v) { this.thr[i] = v; this._pushDelta(i, DELTA_THR, v); } }
   addG(i, e, ii) { if (e) this._pushDelta(i, DELTA_GE, e); if (ii) this._pushDelta(i, DELTA_GI, ii); }
   pulse(ix, mv) { for (const i of ix) this._pushDelta(i, DELTA_GE, mv); }
   wake() {}

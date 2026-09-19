@@ -1,10 +1,19 @@
 // One embodied fly per worker: its own connectome brain + MuJoCo physics world.
-import loadMujoco from '@mujoco/mujoco';
-import { FlyAgent } from './fly.js';
+// THE PACKAGE SHIPS TWO BUILDS and this project has only ever used the single-threaded one.
+//
+// `@mujoco/mujoco/mt` is a pthreads build. It needs SharedArrayBuffer, which this page already has
+// -- vite.config.js sets COOP/COEP because the connectome is shared across workers -- so the only
+// question is whether threading a ~100-DOF model actually pays, and that is a measurement, not an
+// assumption: MuJoCo's step is largely sequential and thread overhead can easily exceed the gain on
+// a model this small. Selected per animal so the two can be compared in the same session.
+let loadMujoco = null;
+import { FlyAgent, PHASES, profStart, profStop, PROF } from './fly.js';
 import { attachBrain, attachEyes } from '../brainsetup.js';
 import { buildGroups, GroupMeter } from './groups.js';
 import { RIGHT } from './motor.js';
 
+let actPrev = null, actMapT = 0;
+let graphRefs = null;
 let fly = null, meter = null, running = false, speed = 1, others = [], env = null, lastReal = 0, simAhead = 0, timer = null;
 let proxyIds = [], lastPose = -Infinity, loopActive = false;
 const POSE_EVERY = 1000 / 30; // wall ms: twelve workers must not flood the render thread
@@ -12,6 +21,7 @@ const POSE_EVERY = 1000 / 30; // wall ms: twelve workers must not flood the rend
 onmessage = async (e) => {
   const m = e.data;
   if (m.type === 'init') {
+    if (!loadMujoco) loadMujoco = (await (m.mt ? import('@mujoco/mujoco/mt') : import('@mujoco/mujoco'))).default;
     const mj = await loadMujoco();
     const g = m.graph;
     const data = { N: g.N, E: g.E, meta: m.meta, indptr: g.indptr, indices: g.indices, weights: g.weights, nt: g.nt, side: g.side, superclass: g.superclass, cls: g.cls };
@@ -21,6 +31,13 @@ onmessage = async (e) => {
     fly = new FlyAgent({ brain, flyvis, mj, flyXML: m.flyXML, env, data, size: g.size, sign: g.sign, bodymap: m.bodymap, gait: m.gait, id: m.id,
       pos: m.pos, yaw: m.yaw, nProxies: m.nProxies, mode: m.mode, brainOpts: m.brainOpts, vision: m.vision, neuromod: { calib: m.neuromod }, sex: m.sex, look: m.look, mushroom: m.mushroom, learn: m.learn, etaMul: m.etaMul, mbParams: m.mbParams, noci: m.noci, dnAll: m.dnAll });
     meter = new GroupMeter(buildGroups(m.bodymap, data.meta.types, data.side), g.N);
+    // Views onto the shared connectome, for graph queries that are not part of stepping.
+    {
+      const buf = m.brainMem.memory.buffer;
+      graphRefs = { N: g.N, E: g.E, types: data.meta.types,
+                    indptr: new Uint32Array(buf, g.indptr, g.N + 1),
+                    indices: new Uint32Array(buf, g.indices, g.E) };
+    }
     proxyIds = Array.from({ length:m.nProxies }, (_,k) => fly.model.body_mocapid[fly.model.body(`proxy${k}`).id]);
     // A saved brain: the mushroom-body depression array from a previous session. Length is
     // checked here as well as in flystore, because loading a wrong-length overlay would index
@@ -31,11 +48,14 @@ onmessage = async (e) => {
       else console.warn(`[fly ${m.id}] saved brain has ${src.length} edges, this index has ${fly.mb.depress.length} -- ignored`);
     }
     if (m.restore) { if (typeof m.restore.energy === 'number') fly.energy = m.restore.energy; if (typeof m.restore.health === 'number') fly.health = m.restore.health; }
-    postMessage({ type: 'ready', id: m.id, noci: fly.nociCounts || null, vpFix: fly.vpFix || null, dnAll: !!fly.motor?.useAllDN, dnN: fly.motor?.dnAllIdx?.length || 0, nbody: fly.model.nbody, bodyNames: [...Array(fly.model.nbody).keys()].map(i => fly.model.body(i).name), wingPoses: fly.flight.wingPoses(mj) });
+    postMessage({ type: 'ready', id: m.id, backend: fly.brain?.device ? 'WebGPU' : 'WASM', mt: !!m.mt, noci: fly.nociCounts || null, vpFix: fly.vpFix || null, dnAll: !!fly.motor?.useAllDN, dnN: fly.motor?.dnAllIdx?.length || 0, nbody: fly.model.nbody, bodyNames: [...Array(fly.model.nbody).keys()].map(i => fly.model.body(i).name), wingPoses: fly.flight.wingPoses(mj) });
     postPose();
     if (running) { lastReal = performance.now(); loop(); }
-  } else if (m.type === 'run') { if (running) return; running = true; lastReal = performance.now(); clearTimeout(timer); if (fly) loop(); }   // before init: loop starts once ready; clearTimeout kills a pending reschedule from a paused loop
-  else if (m.type === 'pause') { running = false; clearTimeout(timer); }
+  // `loop` is now one long-lived async loop rather than a self-rescheduling timeout, so starting
+  // it twice is prevented by `loopActive` inside it rather than by clearing a timer here.
+  } else if (m.type === 'run') { if (running) return; running = true; lastReal = performance.now(); if (fly) loop(); }
+  // The loop notices `running` at its next yield and exits on its own.
+  else if (m.type === 'pause') { running = false; }
   else if (m.type === 'speed') speed = m.speed;
   else if (m.type === 'env') { Object.assign(env, m.env); fly.env = env; if (fly.foodEaten.length !== env.food.length) fly.foodEaten = env.food.map(() => 0); }
   else if (m.type === 'others') { others = m.others; fly.others = others; setProxies(); }
@@ -52,6 +72,23 @@ onmessage = async (e) => {
     postPose();
   }
   else if (m.type === 'mbreset') { fly.mb?.reset(); if (fly.mb) fly.mb.stats.phasicPeak = 0; }
+  // PUT A SAVED BRAIN BACK INTO A LIVE ANIMAL.
+  //
+  // The mirror of `exportmb`. Init could already accept `mbState`, but only at birth, so loading a
+  // saved brain meant destroying the animal and building a new one. This applies it in place.
+  //
+  // It REPLIES, always, including when it refuses. A restore that silently does nothing looks
+  // exactly like one that worked -- the page would report "loaded" and the animal would carry on
+  // with the weights it already had.
+  else if (m.type === 'restoremb') {
+    let ok = false, why = 'no mushroom body in this animal';
+    if (fly?.mb && m.mb) {
+      const src = new Float32Array(m.mb);
+      if (src.length === fly.mb.depress.length) { fly.mb.depress.set(src); fly.mb.dirty = true; ok = true; why = ''; }
+      else why = `saved brain has ${src.length} edges, this index has ${fly.mb.depress.length}`;
+    } else if (!m.mb) why = 'no weights supplied';
+    postMessage({ type: 'mbrestored', id: fly?.id, ok, why, edges: fly?.mb?.depress.length || 0 });
+  }
   // Hand the learned mushroom-body weights back for saving. A copy is transferred, so the
   // running overlay is untouched and the main thread pays no structured-clone cost.
   else if (m.type === 'exportmb') {
@@ -71,10 +108,6 @@ onmessage = async (e) => {
       geom: want, envMonster: fly.env.monster, albedo: gid >= 0 ? fly.albedo(gid, 0, 0) : null,
       nmocap: M.nmocap, hits: fly.fv ? (() => { const gv = fly.fv.gid.GetView(); let n = 0; for (let i = 0; i < gv.length; i++) if (gv[i] === gid) n++; return n; })() : 'no-fv' });
   }
-  // Put the animal on its back, on demand. Righting can only be studied on an animal that is
-  // actually inverted, and waiting for one to fall over means waiting on a hazard that also kills
-  // it -- which confounds "righting failed" with "died before it finished". This makes the state
-  // reproducible and separates the two.
   else if (m.type === 'flip') {
     const d = fly.mjd, a = fly.jointAdr['free'];
     d.qpos[a + 2] = m.z ?? 0.30;                    // clear of the floor so it lands rather than clips
@@ -187,6 +220,58 @@ onmessage = async (e) => {
       tot: Array.from(tot), live: Array.from(live), spikes: Array.from(spikes),
       driven: fly.driven.length });
   }
+  else if (m.type === 'livestats') {
+    const wall = performance.now() - (stats.t0 || performance.now());
+    const known = stats.stepMs + stats.flushMs + stats.syncMs + stats.poseMs + stats.yieldMs;
+    postMessage({ type: 'livestats', id: m.id, wall, simMs: stats.simMs, iters: stats.iters,
+      stepMs: stats.stepMs, flushMs: stats.flushMs, syncMs: stats.syncMs, poseMs: stats.poseMs,
+      yieldMs: stats.yieldMs, otherMs: wall - known,
+      backend: fly?.brain?.device ? 'WebGPU' : 'WASM' });
+    // The phase breakdown of the step itself, summed over the same window.
+    const ph = PROF.on;
+    if (ph) { const o = { steps: ph.steps, wall: performance.now() - ph.t0,
+                          nRates: ph.nRates, nEye: ph.nEye, nChanged: ph.nChanged, nOverlap: ph.nOverlap, nSamp: ph.nSamp };
+              for (const k of PHASES) o[k] = ph[k];
+              postMessage({ type: 'phases', id: m.id, ph: o }); }
+    if (m.reset) { statsReset(); profStart(); }
+    if (m.profOff) profStop();
+  }
+  else if (m.type === 'profile') {
+    const n = m.steps || 200;
+    const t = { senses: 0, brain: 0, physics: 0, total: 0 };
+    const F = fly, B = F.brain;
+    const t0 = performance.now();
+    for (let i = 0; i < n; i++) {
+      const a = performance.now();
+      const st = F.state(); F.senses.update(st, F.env, 1);
+      if (F.fv && (F.t % 20 === 0)) F.fv.update(() => {}, F.env, F.albedo, 20);
+      const b = performance.now();
+      B.step ? B.step(1) : null;
+      if (B.flush) B.flush();
+      const c = performance.now();
+      for (let k = 0; k < F.physPerMs; k++) F.mj.mj_step(F.model, F.mjd);
+      const d2 = performance.now();
+      t.senses += b - a; t.brain += c - b; t.physics += d2 - c;
+    }
+    t.total = performance.now() - t0;
+    postMessage({ type: 'profile', id: F.id, steps: n, ms: t,
+                  physPerMs: F.physPerMs, timestep: F.model.opt.timestep,
+                  backend: B.device ? 'WebGPU' : 'WASM', nSensory: F.driven.length });
+  }
+  else if (m.type === 'actmap') {
+    const cnt = fly.brain.spikeCount, N = cnt.length;
+    if (!actPrev || actPrev.length !== N) actPrev = new Uint32Array(N);
+    const out = new Uint8Array(N);
+    const dt = Math.max(1, fly.t - (actMapT || 0)); actMapT = fly.t;
+    // spikes/s per neuron, mapped so that ~60 Hz saturates: above that the differences stop
+    // mattering for a picture and the bright end would swallow everything else.
+    const k = 255 / 60 * 1000 / dt;
+    for (let i = 0; i < N; i++) {
+      const d = cnt[i] - actPrev[i]; actPrev[i] = cnt[i];
+      if (d > 0) { const v = d * k; out[i] = v > 255 ? 255 : v; }
+    }
+    postMessage({ type: 'actmap', id: fly.id, t: fly.t, act: out.buffer }, [out.buffer]);
+  }
   else if (m.type === 'activity') {
     const eyes = fly.fv ? fly.fv.lumEye.map(e => e.slice(0)) : null;
     postMessage({ type: 'activity', id: fly.id, trace: fly.brain.trace.slice(0), t: fly.t, groups: meter.read(fly.brain.spikeCount, fly.t), eyes });
@@ -209,18 +294,91 @@ function postPose() {
     foodEaten: fly.foodEaten.splice(0, fly.foodEaten.length, ...fly.foodEaten.map(() => 0)), behavior: fly.behavior(st), singing: !!fly.cmd?.singing, drive: fly.intrinsic?.label(), nm: fly.neuromod?.readout(), mb: fly.mb ? { warm: fly.mb._age > fly.mb.p.warmupMs, kc: +fly.mb.stats.kcDrive.toFixed(2), dan: +fly.mb.stats.danDrive.toFixed(2), edges: fly.mb.stats.edges, learning: fly.mb.dirty, depressed: fly.mb.stats.depressed, maxDep: +fly.mb.stats.maxDepress.toFixed(3), meanDep: +fly.mb.stats.meanDepress.toFixed(5), mbon: +fly.mb.stats.mbonDrive.toFixed(2), mExc: +fly.mb.stats.mbonExc.toFixed(2), mInh: +fly.mb.stats.mbonInh.toFixed(2), mAver: +fly.mb.stats.mbonAver.toFixed(2), mAppet: +fly.mb.stats.mbonAppet.toFixed(2), phasic: +fly.mb.stats.phasicMax.toFixed(4), peak: +fly.mb.stats.phasicPeak.toFixed(4), gate: +fly.mb.stats.gate.toFixed(3), popRel: +fly.mb.stats.popRel.toFixed(3), pop: +fly.mb.stats.pop.toFixed(2), popFast: +fly.mb.stats.popFast.toFixed(2), popBase: +fly.mb.stats.popBase.toFixed(2), popAv: +fly.mb.stats.popAv.toFixed(2), avRel: +fly.mb.stats.avRel.toFixed(3) } : null, flying: fly.flight.active, flights: fly.flights, dist: fly.dist, jumps: fly.jumps, pos: st.pos, up: +fly.mjd.xmat[fly.bid.thorax * 9 + 8].toFixed(3),
     roll: +fly.mjd.xmat[fly.bid.thorax * 9 + 7].toFixed(3), yaw: Math.atan2(fly.mjd.xmat[fly.bid.thorax * 9 + 3], fly.mjd.xmat[fly.bid.thorax * 9]) }, [p.xpos.buffer, p.xquat.buffer]);
 }
+// ---- THE LOOP, AND WHY IT USED TO SPEND MOST OF ITS TIME WAITING -------------------------------
+//
+// Measured: one simulated millisecond costs about 2.0 ms of work (physics 77%, senses 20%, brain
+// 3%), which is 49.8% of real time. The loop delivered 0.8 to 3%. Stripping the renderer and every
+// panel recovered only ~2 points, so the ~47 missing points were in here.
+//
+// Two causes, both about waiting rather than working:
+//
+//   1. `await device.queue.onSubmittedWorkDone()` ran EVERY iteration. That drains the GPU
+//      pipeline and serialises CPU against GPU instead of letting them overlap. It exists for a
+//      real reason -- an unbounded compute queue stalls WebGL and leaves the motor reading stale
+//      brain state -- so it is kept, but as a periodic bound rather than a per-iteration stall.
+//
+//   2. `setTimeout(loop, 0)` reschedules itself, and browsers clamp nested timeouts to ~4 ms after
+//      a few levels. With an 8 ms work budget that is up to a third of the time asleep. A
+//      MessageChannel yields to the event loop without the clamp.
+//
+// The per-iteration budget is also raised: more work between yields amortises whatever fixed cost
+// each yield carries. It stays bounded so the worker still returns to its message queue promptly --
+// `pause`, `env` and `tune` must not wait on a long burst.
+//
+// GPU_SYNC_EVERY is a queue-depth bound, not a correctness requirement: the brain's own `flush()`
+// still runs each iteration, and nothing reads GPU results synchronously between syncs.
+const STEP_BUDGET_MS = 24;    // wall ms of stepping per iteration (was 8)
+const STEP_BUDGET_N  = 64;    // simulated ms per iteration (was 8)
+const GPU_SYNC_EVERY = 8;     // drain the queue this often, not every iteration
+
+// A yield that does not clamp. setTimeout(0) from inside a timeout callback is throttled to ~4 ms
+// by every browser after five nested levels; a MessageChannel message is not.
+const yieldChan = new MessageChannel();
+let yieldResolve = null;
+yieldChan.port1.onmessage = () => { const r = yieldResolve; yieldResolve = null; r && r(); };
+const yieldToEventLoop = () => new Promise(res => { yieldResolve = res; yieldChan.port2.postMessage(0); });
+
+let gpuSyncCounter = 0;
+
+// ---- WHERE THE WALL CLOCK ACTUALLY GOES ------------------------------------------------------
+//
+// Every previous profile of this simulation measured the WORK and missed the WAITING, and each time
+// the answer came out roughly 15x better than the loop delivers. The `profile` message times
+// `senses/brain/physics` with the GPU queue left in flight, so it reports what the CPU handed over,
+// not what the frame cost.
+//
+// These accumulators are inside the live loop and partition the whole wall clock: every millisecond
+// between `statsT0` and now lands in exactly one bucket, and whatever is left over is time this
+// worker was not running at all -- message handling, GC, or the browser throttling us. `other` being
+// large is itself the finding; it means the loop is not the thing to optimise.
+const stats = { stepMs: 0, flushMs: 0, syncMs: 0, poseMs: 0, yieldMs: 0, simMs: 0, iters: 0, t0: 0 };
+function statsReset() {
+  stats.stepMs = stats.flushMs = stats.syncMs = stats.poseMs = stats.yieldMs = 0;
+  stats.simMs = stats.iters = 0; stats.t0 = performance.now();
+}
+
 async function loop() {
   if (!running || loopActive) return;
   loopActive = true;
-  const now = performance.now(); simAhead += Math.min(100, now - lastReal) * speed; lastReal = now;
-  const t0 = performance.now(); let steps = 0;
-  // Bound both CPU bursts and GPU work in flight. An unbounded compute queue stalls WebGL
-  // and leaves the motor reading increasingly old brain state when many flies share the GPU.
-  while (running && simAhead >= 1 && steps < 8 && performance.now() - t0 < 8) { fly.step(); simAhead -= 1; steps++; }
-  fly.brain.flush?.();
-  if (steps && fly.brain.device) await fly.brain.device.queue.onSubmittedWorkDone();
-  if (simAhead > 50) simAhead = 50;   // can't keep up: run as fast as possible
-  if (steps && (!running || performance.now() - lastPose >= POSE_EVERY)) postPose();
-  loopActive = false;
-  if (running) timer = setTimeout(loop, 0);
+  if (!stats.t0) statsReset();
+  try {
+    while (running) {
+      const now = performance.now();
+      simAhead += Math.min(100, now - lastReal) * speed; lastReal = now;
+      const t0 = performance.now(); let steps = 0;
+      while (running && simAhead >= 1 && steps < STEP_BUDGET_N && performance.now() - t0 < STEP_BUDGET_MS) {
+        fly.step(); simAhead -= 1; steps++;
+      }
+      const tStep = performance.now(); stats.stepMs += tStep - t0; stats.simMs += steps; stats.iters++;
+      fly.brain.flush?.();
+      const tFlush = performance.now(); stats.flushMs += tFlush - tStep;
+      // Bound the queue rather than drain it every iteration, and always drain before stopping so
+      // a paused animal is not left with work in flight.
+      if (steps && fly.brain.device && (++gpuSyncCounter >= GPU_SYNC_EVERY || !running)) {
+        gpuSyncCounter = 0;
+        await fly.brain.device.queue.onSubmittedWorkDone();
+      }
+      const tSync = performance.now(); stats.syncMs += tSync - tFlush;
+      if (simAhead > 50) simAhead = 50;   // can't keep up: run as fast as possible
+      if (steps && (!running || performance.now() - lastPose >= POSE_EVERY)) postPose();
+      const tPose = performance.now(); stats.poseMs += tPose - tSync;
+      // Yield so the worker answers its message queue -- pause, env, tune must not wait on a burst.
+      await yieldToEventLoop();
+      stats.yieldMs += performance.now() - tPose;
+    }
+  } finally {
+    // Cleared in `finally` so a throw inside the loop cannot leave the worker permanently unable to
+    // start again: loopActive stuck true would make every later `run` a silent no-op.
+    loopActive = false;
+  }
 }

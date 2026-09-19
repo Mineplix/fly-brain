@@ -60,7 +60,15 @@ export class LIFWasm {
   }
   setBackground(rateHz, ampMv) { this.p.bgRate = rateHz; this.p.bgAmp = ampMv; this.dv.setFloat32(172, this.N * rateHz * this.p.dt / 1000, true); this.dv.setFloat32(176, ampMv, true); }
   _syncDriven() { let n = 0; for (const i of this.drivenSet) this.drivenList[n++] = i; this.dv.setInt32(160, n, true); this._drivenDirty = false; }
-  setDriveOne(i, rate) { this.drive[i] = rate; if (rate > 0) { if (!this.drivenSet.has(i)) { this.drivenSet.add(i); this._drivenDirty = true; } } else if (this.drivenSet.delete(i)) this._drivenDirty = true; }
+  // fround and early-out, as in the WebGPU kernel: `drive` is a Float32Array, so comparing its
+  // read-back against a double marks every write as a change.
+  setDriveOne(i, rate) {
+    const r = Math.fround(rate);
+    if (this.drive[i] === r) return;
+    this.drive[i] = r;
+    if (r > 0) { if (!this.drivenSet.has(i)) { this.drivenSet.add(i); this._drivenDirty = true; } }
+    else if (this.drivenSet.delete(i)) this._drivenDirty = true;
+  }
   setDrive(ix, rate) { for (let k = 0; k < ix.length; k++) this.setDriveOne(ix[k], rate); }
   setBias(ix, mv) { for (let k = 0; k < ix.length; k++) this.bias[ix[k]] = mv; }
   setThr(i, mv) { this.thr[i] = mv; }
